@@ -1,0 +1,4 @@
+# ignore app cache folder
+.cache/
+
+arduino-cli-help.txt
