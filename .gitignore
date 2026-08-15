@@ -2,3 +2,7 @@
 .cache/
 
 arduino-cli-help.txt
+
+# generated CAD exports -- regenerate via cad/build_all.py, don't commit
+cad/output/
+__pycache__/
