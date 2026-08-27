@@ -10,6 +10,10 @@ SAMPLE_RATE = 16000
 CHUNK_FRAMES = 4000
 BYTES_PER_FRAME = 2  # 16-bit mono samples
 
+# ALSA's "default" device stays pinned to the board's built-in codec (card 0),
+# not the USB mic -- so the capture device must be named explicitly.
+ARECORD_DEVICE = os.environ.get("ARECORD_DEVICE", "plughw:CARD=Device,DEV=0")
+
 WAKE_WORD = "robot"
 
 COMMANDS = {
@@ -24,6 +28,7 @@ GRAMMAR = json.dumps([f"{WAKE_WORD} {phrase}" for phrase in COMMANDS] + ["[unk]"
 ARECORD_COMMAND = [
     "arecord",
     "-q",
+    "-D", ARECORD_DEVICE,
     "-f", "S16_LE",
     "-r", str(SAMPLE_RATE),
     "-c", "1",
