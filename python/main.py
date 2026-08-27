@@ -22,6 +22,7 @@ def loop() -> None:
     if command is not None:
         print(f"Voice command recognized: {command}")
         Bridge.call("show_text", LED_CODES[command])
+        Bridge.call("move", command)
     # You can replace this with any code you want your App to run repeatedly.
     if (datetime.now() - previous).seconds > 10:
         print("PY")

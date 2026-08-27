@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Arduino_RouterBridge.h>
+#include <Arduino_Modulino.h>
 #include <Wire.h>
 #include "SmoothDistance.h"
 #include "SmoothMovement.h"
@@ -9,16 +10,57 @@ SmoothDistance distance;
 SmoothMovement movement;
 BridgeClass    bridge;
 LedMatrixDisplay ledMatrix;
+ModulinoMotors motors;
 
 int previous;
 
 int hl = HIGH;
 bool distanceOk = false;
 bool movementOk = false;
+bool motorsOk = false;
+
+const uint8_t DRIVE_SPEED = 50;
 
 bool show_text(String text)
 {
   ledMatrix.print(text.c_str());
+  return true;
+}
+
+// Motor A drives the left wheel, Motor B the right wheel.
+bool move(String command)
+{
+  if (!motorsOk) return false;
+
+  if (command == "go_ahead")
+  {
+    motors.setInvertA(false);
+    motors.setInvertB(false);
+    motors.setSpeedA(DRIVE_SPEED);
+    motors.setSpeedB(DRIVE_SPEED);
+  }
+  else if (command == "turn_right")
+  {
+    motors.setInvertA(false);
+    motors.setInvertB(true);
+    motors.setSpeedA(DRIVE_SPEED);
+    motors.setSpeedB(DRIVE_SPEED);
+  }
+  else if (command == "turn_left")
+  {
+    motors.setInvertA(true);
+    motors.setInvertB(false);
+    motors.setSpeedA(DRIVE_SPEED);
+    motors.setSpeedB(DRIVE_SPEED);
+  }
+  else if (command == "stop")
+  {
+    motors.stop();
+  }
+  else
+  {
+    return false;
+  }
   return true;
 }
 
@@ -34,9 +76,12 @@ void setup() {
   previous = millis();
   bridge.begin();
   bridge.provide("show_text", show_text);
+  bridge.provide("move", move);
   distanceOk = distance.initialize();
   movementOk = movement.initialize();
   ledMatrix.initialize();
+  motorsOk = motors.begin();
+  motors.setStepperModeEnabled(false);
 }
 
 void showDistance() {
