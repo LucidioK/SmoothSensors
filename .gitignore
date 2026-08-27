@@ -6,3 +6,6 @@ arduino-cli-help.txt
 # generated CAD exports -- regenerate via cad/build_all.py, don't commit
 cad/output/
 __pycache__/
+
+# Vosk speech model -- downloaded separately, not committed
+python/model/
