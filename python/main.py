@@ -1,6 +1,6 @@
 import time
 from datetime import datetime
-from arduino.app_utils import App
+from arduino.app_utils import App, Bridge
 from VoiceCommands import VoiceCommands
 
 print("Hello world lk01!")
@@ -8,12 +8,20 @@ print("Hello world lk01!")
 previous: datetime = datetime.now()
 voice = VoiceCommands()
 
+LED_CODES = {
+    "go_ahead": "gh",
+    "turn_right": "tr",
+    "turn_left": "tl",
+    "stop": "stp",
+}
+
 def loop() -> None:
     """This function is called repeatedly by the App framework."""
     global previous
     command = voice.poll()
     if command is not None:
         print(f"Voice command recognized: {command}")
+        Bridge.call("show_text", LED_CODES[command])
     # You can replace this with any code you want your App to run repeatedly.
     if (datetime.now() - previous).seconds > 10:
         print("PY")

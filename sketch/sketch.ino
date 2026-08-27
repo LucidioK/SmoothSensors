@@ -3,16 +3,25 @@
 #include <Wire.h>
 #include "SmoothDistance.h"
 #include "SmoothMovement.h"
+#include "LedMatrixDisplay.h"
 
 SmoothDistance distance;
 SmoothMovement movement;
 BridgeClass    bridge;
+LedMatrixDisplay ledMatrix;
 
 int previous;
 
 int hl = HIGH;
 bool distanceOk = false;
 bool movementOk = false;
+
+bool show_text(String text)
+{
+  ledMatrix.print(text.c_str());
+  return true;
+}
+
 void setup() {
   Wire.begin();
   delay(500);
@@ -24,8 +33,10 @@ void setup() {
   digitalWrite(LED_BUILTIN, hl);
   previous = millis();
   bridge.begin();
+  bridge.provide("show_text", show_text);
   distanceOk = distance.initialize();
   movementOk = movement.initialize();
+  ledMatrix.initialize();
 }
 
 void showDistance() {
