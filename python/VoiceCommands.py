@@ -1,13 +1,14 @@
 import json
 import os
+import subprocess
 from typing import Optional
 
-import pyaudio
 from vosk import KaldiRecognizer, Model
 
 MODEL_PATH = os.environ.get("VOSK_MODEL_PATH", os.path.join(os.path.dirname(__file__), "model"))
 SAMPLE_RATE = 16000
-CHUNK_SIZE = 4000
+CHUNK_FRAMES = 4000
+BYTES_PER_FRAME = 2  # 16-bit mono samples
 
 WAKE_WORD = "robot"
 
@@ -20,27 +21,28 @@ COMMANDS = {
 
 GRAMMAR = json.dumps([f"{WAKE_WORD} {phrase}" for phrase in COMMANDS] + ["[unk]"])
 
+ARECORD_COMMAND = [
+    "arecord",
+    "-q",
+    "-f", "S16_LE",
+    "-r", str(SAMPLE_RATE),
+    "-c", "1",
+    "-t", "raw",
+]
+
 
 class VoiceCommands:
-    """Listens on the default microphone and recognizes wake-word-prefixed voice commands."""
+    """Captures microphone audio via arecord and recognizes wake-word-prefixed voice commands."""
 
     def __init__(self) -> None:
         model = Model(MODEL_PATH)
         self._recognizer = KaldiRecognizer(model, SAMPLE_RATE, GRAMMAR)
-        self._audio = pyaudio.PyAudio()
-        self._stream = self._audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=SAMPLE_RATE,
-            input=True,
-            frames_per_buffer=CHUNK_SIZE,
-        )
-        self._stream.start_stream()
+        self._process = subprocess.Popen(ARECORD_COMMAND, stdout=subprocess.PIPE)
 
     def poll(self) -> Optional[str]:
         """Reads one chunk of audio and returns a recognized command, or None."""
-        data = self._stream.read(CHUNK_SIZE, exception_on_overflow=False)
-        if not self._recognizer.AcceptWaveform(data):
+        data = self._process.stdout.read(CHUNK_FRAMES * BYTES_PER_FRAME)
+        if not data or not self._recognizer.AcceptWaveform(data):
             return None
         text = json.loads(self._recognizer.Result()).get("text", "")
         return self._parse_command(text)
@@ -52,6 +54,5 @@ class VoiceCommands:
         return COMMANDS.get(text[len(prefix):])
 
     def close(self) -> None:
-        self._stream.stop_stream()
-        self._stream.close()
-        self._audio.terminate()
+        self._process.terminate()
+        self._process.wait()
