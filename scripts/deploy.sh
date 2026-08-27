@@ -27,6 +27,10 @@ else
 fi
 
 echo "==> Restarting the app (compiles + uploads the sketch, restarts the Python app)"
-ssh "$BOARD_HOST" "arduino-app-cli app restart ${REMOTE_DIR}"
+if ! ssh "$BOARD_HOST" "arduino-app-cli app restart ${REMOTE_DIR}"; then
+  echo "==> restart failed (arduino-app-cli sometimes leaves the app stopped instead of restarting it), falling back to stop + start"
+  ssh "$BOARD_HOST" "arduino-app-cli app stop ${REMOTE_DIR}" || true
+  ssh "$BOARD_HOST" "arduino-app-cli app start ${REMOTE_DIR}"
+fi
 
 echo "==> Done. Tail logs with: ssh ${BOARD_HOST} arduino-app-cli app logs ${REMOTE_DIR} --follow"
