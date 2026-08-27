@@ -8,7 +8,6 @@
 
 SmoothDistance distance;
 SmoothMovement movement;
-BridgeClass    bridge;
 LedMatrixDisplay ledMatrix;
 ModulinoMotors motors;
 
@@ -74,9 +73,9 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, hl);
   previous = millis();
-  bridge.begin();
-  bridge.provide("show_text", show_text);
-  bridge.provide("move", move);
+  Bridge.begin();
+  Bridge.provide("show_text", show_text);
+  Bridge.provide("move", move);
   distanceOk = distance.initialize();
   movementOk = movement.initialize();
   ledMatrix.initialize();
@@ -149,10 +148,4 @@ void loop() {
     
     Monitor.flush();
   }
-}
-
-
-RpcCall get_sensor_values()
-{
-  
 }
