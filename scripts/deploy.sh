@@ -6,7 +6,9 @@
 
 set -euo pipefail
 
-BOARD_HOST="${1:-${BOARD_HOST:-arduino@10.0.0.245}}"
+BOARD_IP="${1:-${BOARD_IP:-10.0.0.195}}"
+ping -c 1 "$BOARD_IP" >/dev/null || { echo "==> ERROR: Board not reachable at ${BOARD_IP} (check BOARD_IP or network)"; exit 1; }
+BOARD_HOST="${1:-${BOARD_HOST:-arduino@${BOARD_IP}}}"
 APP_NAME="smoothsensors03"
 REMOTE_DIR="ArduinoApps/${APP_NAME}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

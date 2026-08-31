@@ -18,7 +18,7 @@ bool distanceOk = false;
 bool movementOk = false;
 bool motorsOk = false;
 
-const uint8_t DRIVE_SPEED = 50;
+const uint8_t DRIVE_SPEED = 90;
 
 bool show_text(String text)
 {
