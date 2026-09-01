@@ -5,12 +5,13 @@
 #include "SmoothDistance.h"
 #include "SmoothMovement.h"
 #include "LedMatrixDisplay.h"
+#include "RobotMotors.h"
 
-#define INFINITE_DISTANCE 1000000 
+#define INFINITE_DISTANCE 1000000
 SmoothDistance distance;
 SmoothMovement movement;
 LedMatrixDisplay ledMatrix;
-ModulinoMotors motors;
+RobotMotors robotMotors;
 
 int previous;
 int previousDistanceRead;
@@ -18,11 +19,7 @@ int previousDistanceRead;
 int hl = HIGH;
 bool distanceOk = false;
 bool movementOk = false;
-bool motorsOk = false;
 int distanceCm = INFINITE_DISTANCE;
-String motorStatus = "";
-
-const uint8_t DRIVE_SPEED = 90;
 
 bool show_text(String text)
 {
@@ -30,46 +27,9 @@ bool show_text(String text)
   return true;
 }
 
-// Motor A drives the left wheel, Motor B the right wheel.
 bool move(String command)
 {
-  motorStatus = "NOK";
-  if (!motorsOk) return false;
-
-  if (command == "go_ahead")
-  {
-    motorStatus = "GHD";
-    motors.setInvertA(true);
-    motors.setInvertB(true);
-    motors.setSpeedA(DRIVE_SPEED);
-    motors.setSpeedB(DRIVE_SPEED);
-  }
-  else if (command == "turn_right")
-  {
-    motorStatus = "TRG";
-    motors.setInvertA(true);
-    motors.setInvertB(false);
-    motors.setSpeedA(DRIVE_SPEED);
-    motors.setSpeedB(DRIVE_SPEED);
-  }
-  else if (command == "turn_left")
-  {
-    motorStatus = "TLF";
-    motors.setInvertA(false);
-    motors.setInvertB(true);
-    motors.setSpeedA(DRIVE_SPEED);
-    motors.setSpeedB(DRIVE_SPEED);
-  }
-  else if (command == "stop")
-  {
-    motorStatus = "STP";
-    motors.stop();
-  }
-  else
-  {
-    return false;
-  }
-  return true;
+  return robotMotors.move(command);
 }
 
 void setup() {
@@ -88,8 +48,7 @@ void setup() {
   distanceOk = distance.initialize();
   movementOk = movement.initialize();
   ledMatrix.initialize();
-  motorsOk = motors.begin();
-  motors.setStepperModeEnabled(false);
+  robotMotors.initialize();
 }
 
 void showDistance() {
@@ -131,7 +90,7 @@ void showMovement() {
 
 void showMotorStatus() {
   Monitor.print("Motor: ");
-  Monitor.println(motorStatus);
+  Monitor.println(robotMotors.getStatus());
 }
 
 
