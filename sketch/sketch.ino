@@ -6,17 +6,21 @@
 #include "SmoothMovement.h"
 #include "LedMatrixDisplay.h"
 
+#define INFINITE_DISTANCE 1000000 
 SmoothDistance distance;
 SmoothMovement movement;
 LedMatrixDisplay ledMatrix;
 ModulinoMotors motors;
 
 int previous;
+int previousDistanceRead;
 
 int hl = HIGH;
 bool distanceOk = false;
 bool movementOk = false;
 bool motorsOk = false;
+int distanceCm = INFINITE_DISTANCE;
+String motorStatus = "";
 
 const uint8_t DRIVE_SPEED = 90;
 
@@ -29,31 +33,36 @@ bool show_text(String text)
 // Motor A drives the left wheel, Motor B the right wheel.
 bool move(String command)
 {
+  motorStatus = "NOK";
   if (!motorsOk) return false;
 
   if (command == "go_ahead")
   {
-    motors.setInvertA(false);
-    motors.setInvertB(false);
+    motorStatus = "GHD";
+    motors.setInvertA(true);
+    motors.setInvertB(true);
     motors.setSpeedA(DRIVE_SPEED);
     motors.setSpeedB(DRIVE_SPEED);
   }
   else if (command == "turn_right")
   {
-    motors.setInvertA(false);
-    motors.setInvertB(true);
-    motors.setSpeedA(DRIVE_SPEED);
-    motors.setSpeedB(DRIVE_SPEED);
-  }
-  else if (command == "turn_left")
-  {
+    motorStatus = "TRG";
     motors.setInvertA(true);
     motors.setInvertB(false);
     motors.setSpeedA(DRIVE_SPEED);
     motors.setSpeedB(DRIVE_SPEED);
   }
+  else if (command == "turn_left")
+  {
+    motorStatus = "TLF";
+    motors.setInvertA(false);
+    motors.setInvertB(true);
+    motors.setSpeedA(DRIVE_SPEED);
+    motors.setSpeedB(DRIVE_SPEED);
+  }
   else if (command == "stop")
   {
+    motorStatus = "STP";
     motors.stop();
   }
   else
@@ -86,7 +95,6 @@ void setup() {
 void showDistance() {
     if (distanceOk)
     {
-      int distanceCm = distance.getDistanceCm();
       Monitor.print("Distance: ");
       Monitor.print(distanceCm);
       Monitor.println("cm");
@@ -121,6 +129,11 @@ void showMovement() {
   }  
 }
 
+void showMotorStatus() {
+  Monitor.print("Motor: ");
+  Monitor.println(motorStatus);
+}
+
 
 void loop() {
   // put your main code here, to run repeatedly:
@@ -134,7 +147,18 @@ void loop() {
   if (movementOk) {
     movement.record();
   }
-  
+
+  if (now - previousDistanceRead > 100)
+  {
+    distanceCm = distance.getDistanceCm();
+    distanceCm = distanceCm ? distanceCm : INFINITE_DISTANCE;
+    previousDistanceRead = now;
+    if (distanceCm < 10) {
+      move("stop");
+      show_text("STP");
+    }
+  }
+
   if (timespan > 1000)
   {
     Monitor.flush();
@@ -145,6 +169,8 @@ void loop() {
     showDistance();
 
     showMovement();
+
+    showMotorStatus();
     
     Monitor.flush();
   }
