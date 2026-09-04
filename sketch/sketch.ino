@@ -8,6 +8,9 @@
 #include "RobotMotors.h"
 
 #define INFINITE_DISTANCE 1000000
+#define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
+#define STATUS_TIMESPAN_WHEN_MOVING_MS 200
+#define INFINITE_DISTANCE 1000000
 SmoothDistance distance;
 SmoothMovement movement;
 LedMatrixDisplay ledMatrix;
@@ -15,11 +18,14 @@ RobotMotors robotMotors;
 
 int previous;
 int previousDistanceRead;
+int statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
 int hl = HIGH;
 bool distanceOk = false;
 bool movementOk = false;
 int distanceCm = INFINITE_DISTANCE;
+int minimumDistance = 10;
+bool alreadyAlertedAboutDistance = false;
 
 bool show_text(String text)
 {
@@ -29,6 +35,8 @@ bool show_text(String text)
 
 bool move(String command)
 {
+  statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
+  
   return robotMotors.move(command);
 }
 
@@ -49,6 +57,7 @@ void setup() {
   movementOk = movement.initialize();
   ledMatrix.initialize();
   robotMotors.initialize();
+  show_text("rdy");
 }
 
 void showDistance() {
@@ -80,7 +89,6 @@ void showMovement() {
     Monitor.print(ry);
     Monitor.print(" rz=");
     Monitor.println(rz);
-
   }
   else
   {
@@ -107,18 +115,24 @@ void loop() {
     movement.record();
   }
 
-  if (now - previousDistanceRead > 100)
+  if (now - previousDistanceRead > STATUS_TIMESPAN_WHEN_MOVING_MS / 10)
   {
     distanceCm = distance.getDistanceCm();
     distanceCm = distanceCm ? distanceCm : INFINITE_DISTANCE;
     previousDistanceRead = now;
     if (distanceCm < 10) {
       move("stop");
-      show_text("STP");
+      char buf[4];
+      show_text(String(itoa(distanceCm, buf, 10)));
+      alreadyAlertedAboutDistance = true;
+    }
+    else if (alreadyAlertedAboutDistance) {
+      alreadyAlertedAboutDistance = false;
+      show_text("_");
     }
   }
 
-  if (timespan > 1000)
+  if (timespan > STATUS_TIMESPAN_WHEN_MOVING_MS)
   {
     Monitor.flush();
     hl = (hl == HIGH) ? LOW : HIGH;

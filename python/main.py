@@ -17,6 +17,7 @@ LED_CODES = {
 
 def loop() -> None:
     """This function is called repeatedly by the App framework."""
+    # `previous` is module-level state updated by this callback.
     global previous
     command = voice.poll()
     if command is not None:

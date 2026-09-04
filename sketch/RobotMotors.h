@@ -62,6 +62,8 @@ public:
     {
       _status = "STP";
       _motors.stop();
+      delay(200);
+      _motors.stop();
     }
     else
     {

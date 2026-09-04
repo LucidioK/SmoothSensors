@@ -39,7 +39,7 @@ public:
 
     _matrix.beginDraw();
     _matrix.stroke(0xFFFFFFFF);
-    _matrix.textFont(Font_5x7);
+    _matrix.textFont(Font_4x6);
     _matrix.beginText(0, 1, 0xFFFFFF);
     _matrix.println(padded);
     _matrix.endText(NO_SCROLL);
