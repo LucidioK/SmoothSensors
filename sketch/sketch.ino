@@ -63,13 +63,13 @@ void setup() {
 void showDistance() {
     if (distanceOk)
     {
-      Monitor.print("Distance: ");
+      Monitor.print(" DST: ");
       Monitor.print(distanceCm);
-      Monitor.println("cm");
+      Monitor.print("cm");
     }
     else
     {
-      Monitor.println("Distance NOK");
+      Monitor.print("Distance NOK");
     }  
 }
 
@@ -77,7 +77,7 @@ void showMovement() {
   if (movementOk) {
     float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
     movement.get(&ax, &ay, &az, &rx, &ry, &rz);
-    Monitor.print("ax=");
+    Monitor.print(" ax=");
     Monitor.print(ax);
     Monitor.print(" ay=");
     Monitor.print(ay);
@@ -88,17 +88,17 @@ void showMovement() {
     Monitor.print(" ry=");
     Monitor.print(ry);
     Monitor.print(" rz=");
-    Monitor.println(rz);
+    Monitor.print(rz);
   }
   else
   {
-    Monitor.println("Movement NOK");
+    Monitor.print(" Movement NOK");
   }  
 }
 
 void showMotorStatus() {
-  Monitor.print("Motor: ");
-  Monitor.println(robotMotors.getStatus());
+  Monitor.print(" MOT: ");
+  Monitor.print(robotMotors.getStatus());
 }
 
 
@@ -144,7 +144,8 @@ void loop() {
     showMovement();
 
     showMotorStatus();
-    
+
+    Monitor.println();
     Monitor.flush();
   }
 }

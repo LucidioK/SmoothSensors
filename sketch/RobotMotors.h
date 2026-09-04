@@ -42,6 +42,14 @@ public:
       _motors.setSpeedA(DRIVE_SPEED);
       _motors.setSpeedB(DRIVE_SPEED);
     }
+    if (command == "go_back")
+    {
+      _status = "GBK";
+      _motors.setInvertA(false);
+      _motors.setInvertB(false);
+      _motors.setSpeedA(DRIVE_SPEED);
+      _motors.setSpeedB(DRIVE_SPEED);
+    }    
     else if (command == "turn_right")
     {
       _status = "TRG";
