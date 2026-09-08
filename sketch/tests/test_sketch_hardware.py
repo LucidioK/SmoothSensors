@@ -6,15 +6,15 @@ Unlike python/tests/test_python_app.py (fully mocked, runs anywhere), this test
 needs the REAL board: it deploys the current sketch/, python/, and app.yaml to
 the Uno Q via scripts/deploy.sh (POSIX) or scripts/deploy.ps1 (Windows) -- exactly
 like a normal `scripts/deploy.sh` run -- which compiles and uploads the sketch
-and restarts the app, then reads back two SSH streams and asserts on the status
-lines each side prints once a second:
+and restarts the app, then reads back two SSH streams, one after the other (see
+capture_mcu_and_app_streams's docstring for why not concurrently), and asserts
+on the status lines each side prints once a second:
 
   - `arduino-app-cli monitor` -- the MCU's own Serial output (sketch/sketch.ino's
     `Monitor.print(...)` calls), which is where each sensor/motor class reports:
       - SmoothDistance -> " DST: <n>cm" (or "Distance NOK" if unwired)
       - SmoothMovement -> " ax=<n> ay=<n> ..." (or "Movement NOK" if unwired)
       - RobotMotors    -> " MOT: <status>"
-      - the boot banner "SmoothSensors003..." confirms the MCU sketch came up
   - `arduino-app-cli app logs <remote_dir> --follow` -- the Python app's own
     stdout (confirmed via `arduino-app-cli app logs --help`: "Show the logs of
     the Python app" -- it does NOT carry the MCU's Monitor output, the two are
@@ -109,16 +109,27 @@ def _stop_and_collect(proc: subprocess.Popen) -> str:
     return out or ""
 
 
+def capture_stream(board_host: str, remote_cmd: list[str], seconds: int) -> str:
+    """Runs one SSH command for a fixed, client-side-timed window and returns its output."""
+    proc = _start_ssh_stream(board_host, remote_cmd)
+    time.sleep(seconds)
+    return _stop_and_collect(proc)
+
+
 def capture_mcu_and_app_streams(board_host: str, remote_dir: str, seconds: int) -> tuple[str, str]:
     """
-    Runs `arduino-app-cli monitor` (MCU Serial output) and `arduino-app-cli app
-    logs <remote_dir> --follow` (Python app stdout) concurrently over SSH for a
-    fixed, client-side-timed window, and returns (mcu_output, app_output).
+    Captures `arduino-app-cli monitor` (MCU Serial output) then `arduino-app-cli
+    app logs <remote_dir> --follow` (Python app stdout), one after the other --
+    NOT concurrently: if the board is only set up for password SSH auth (see
+    README.md's "key-based access" note), two simultaneous ssh processes both
+    prompting for a password race for the same terminal stdin and one of them
+    loses ("Permission denied, please try again."). Sequential capture avoids
+    that regardless of which auth method is configured, at the cost of roughly
+    doubling this function's wall-clock time.
     """
-    mcu_proc = _start_ssh_stream(board_host, ["arduino-app-cli", "monitor"])
-    app_proc = _start_ssh_stream(board_host, ["arduino-app-cli", "app", "logs", remote_dir, "--follow"])
-    time.sleep(seconds)
-    return _stop_and_collect(mcu_proc), _stop_and_collect(app_proc)
+    mcu_output = capture_stream(board_host, ["arduino-app-cli", "monitor"], seconds)
+    app_output = capture_stream(board_host, ["arduino-app-cli", "app", "logs", remote_dir, "--follow"], seconds)
+    return mcu_output, app_output
 
 
 def setUpModule():
@@ -158,13 +169,16 @@ class SketchHardwareTests(unittest.TestCase):
     """Each test inspects one of the two captured streams from setUpModule
     (CAPTURED_MCU_MONITOR or CAPTURED_APP_LOGS) for evidence that a specific
     class initialized and is running on real hardware. Order doesn't matter --
-    there's no per-test state."""
+    there's no per-test state.
 
-    def test_mcu_sketch_boots(self):
-        self.assertIn(
-            "SmoothSensors003", CAPTURED_MCU_MONITOR,
-            "sketch.ino's setup() banner never appeared -- MCU sketch may not have booted",
-        )
+    There's no test for sketch.ino's "SmoothSensors003..." boot banner: it's
+    printed exactly once, on the sketch's first loop() iteration after boot
+    (see `_alreadyShowedAppName` in sketch.ino), and `arduino-app-cli monitor`
+    is a live tail with no history buffer -- by the time this script deploys,
+    waits, and attaches, that one-time line has already scrolled past. The
+    status-line tests below are the reliable signal instead: none of them can
+    print without setup() having already completed successfully.
+    """
 
     def test_python_app_boots(self):
         self.assertIn(
