@@ -62,6 +62,7 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 * `app.yaml` — the App Lab manifest that ties the `sketch/` and `python/` halves together into a single deployable app (`SmoothSensors03`).
 * `SPEC.md` — the full project specification (hardware, architecture, behaviors, safety interlocks) for the robot, including parts not yet built.
 * `PHASE1.md` — the current build phase broken into ordered, individually testable scenarios (non-vision voice commands, motors, safety), scoped down from `SPEC.md`.
+* `test.py` — runs the whole test suite: `python/tests/` (always safe), then `sketch/tests/test_sketch_hardware.py` (a no-op dry run unless `--yes` is passed). Extra CLI args are forwarded to the sketch test, e.g. `python test.py --yes`.
 
 ### `sketch/` — MCU-side C++ program (Zephyr RTOS)
 
