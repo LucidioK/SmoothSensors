@@ -2,8 +2,8 @@
 .cache/
 
 arduino-cli-help.txt
-ssh_*.*
-id_*.*
+ssh_*
+id_*
 
 # generated CAD exports -- regenerate via cad/build_all.py, don't commit
 cad/output/
