@@ -92,6 +92,7 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 |------|--------------|
 | `deploy.sh` | Pushes `sketch/`, `python/` (except `python/model/`), and `app.yaml` to the board over `tar`+`ssh`, then restarts the app via `arduino-app-cli`. Run from Linux/Mac/WSL. |
 | `deploy.ps1` | Windows PowerShell equivalent of `deploy.sh`; auto-detects the board's IP address. |
+| `setup_ssh_key.py` | Sets up passwordless SSH access to the board (the actual "ssh-copy-id" step — reuses `~/.ssh/id_ed25519` if you have one, otherwise generates a dedicated key, then appends the public key to the board's `~/.ssh/authorized_keys`). Run once before using `deploy.sh`/`deploy.ps1`; prompts for the board's password one last time. Safe to re-run. |
 | `diagnose_usb_mic.sh` | Diagnoses (and, with `--fix`, attempts to repair) USB host / microphone enumeration problems on the board's Linux side — e.g. forcing the board's dual-role USB-C port into host mode so a hub/mic enumerates correctly. Must be run **on the board**, not the PC (it inspects local kernel/sysfs USB state). Can be piped over SSH without copying it to the board first: `ssh <board-user@host> 'bash -s' -- --fix < scripts/diagnose_usb_mic.sh`. |
 
 ## If you are using WSL (Windows System for Linux)
@@ -110,6 +111,7 @@ If you are in Windows using WSL, you will need to run that command in a Powershe
 
 1. First, you need to initialize the Arduino board. Make sure you followed the [Initial Setup instructions](https://docs.arduino.cc/software/app-lab/setup/overview) for [Single Board Computer](https://docs.arduino.cc/software/app-lab/setup/standalone) mode.
 1. After your Arduino Q is connected to your network, you will always use it through the network, the provided deploy scripts assume the board is already network bound.
+1. Set up passwordless SSH access to the board (the deploy scripts call `ssh` non-interactively, which doesn't work with password auth): run `python scripts/setup_ssh_key.py` once (or `python scripts/setup_ssh_key.py arduino@<board-ip>` if it's not at the default address). You'll be prompted for the board's password one last time.
 1. About the board's IP address:
    1. If you are using Windows with Powershell, you can use `scripts/deploy.ps1`, it automatically detect the board's IP address.
    1. Otherwise, you will need to discover the board's IP address and configure `scripts/deploy.sh` to point to the address:

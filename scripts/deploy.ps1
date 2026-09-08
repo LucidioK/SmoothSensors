@@ -6,7 +6,8 @@
 #
 # Requires: tar.exe (bundled with Windows 10 1803+/Windows 11), the OpenSSH client
 # (Settings > Optional Features, or `Add-WindowsCapability -Online -Name OpenSSH.Client`),
-# and SSH key-based access to the board (password auth doesn't work non-interactively).
+# and SSH key-based access to the board (password auth doesn't work non-interactively --
+# run scripts/setup_ssh_key.py once to set this up).
 
 param(
     [Parameter(Position = 0, Mandatory = $false)]
@@ -48,19 +49,6 @@ if ([string]::IsNullOrEmpty($BoardHostArg) -and [string]::IsNullOrEmpty($env:BOA
     Write-Host "==> Detected BOARD_IP=$env:BOARD_IP" -ForegroundColor Green;
 }
 
-function Copy-SshKeyToBoardIfNeeded {
-    param(
-        [Parameter(Mandatory)][string]$BoardHost
-    )
-    Write-Host "==> Checking SSH key for board access for $BoardHost" -ForegroundColor Green;
-    if (-not (test-path ./id_ed25519)) {
-        Write-Host "==> Generating SSH key for board access (only needs to be done once)" -ForegroundColor Green;
-        cmd /c "ssh-keygen -t ed25519 -f ./id_ed25519 -N ''" | Out-Null;
-        Write-Host "==> Copying SSH key to board $BoardHost (only needs to be done once)" -ForegroundColor Green;
-        cmd /c "scp ./id_ed25519.pub $($BoardHost)://home/arduino/.ssh" | Out-Null;    
-    }
-}
-
 function Get-BoardHost {
     $BoardIp = if (-not [string]::IsNullOrEmpty($BoardHostArg)) { (extractWithRegex $BoardHostArg "([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)")} 
                 elseif ($env:BOARD_IP) { $env:BOARD_IP } 
@@ -77,7 +65,6 @@ function Get-BoardHost {
 
 
 $BoardHost = Get-BoardHost;
-Copy-SshKeyToBoardIfNeeded -BoardHost $BoardHost;
 $RemoteDir = "ArduinoApps/$AppName";
 $LocalDir = Split-Path -Parent $PSScriptRoot;
 

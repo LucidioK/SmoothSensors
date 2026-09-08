@@ -2,7 +2,10 @@
 # Deploys this App Lab project to the UNO Q over the network and (re)starts it.
 #
 # Usage: scripts/deploy.sh [board-user@host]
-# Defaults to $BOARD_HOST, or arduino@10.0.0.245 if unset.
+# Defaults to $BOARD_HOST, or arduino@10.0.0.195 if unset.
+#
+# Requires SSH key-based access to the board (password auth doesn't work
+# non-interactively) -- run scripts/setup_ssh_key.py once to set this up.
 
 set -euo pipefail
 

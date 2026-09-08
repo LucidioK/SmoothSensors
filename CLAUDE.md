@@ -25,7 +25,7 @@ arduino-cli compile -b arduino:zephyr:unoq --profile default sketch
 ```
 scripts/deploy.sh [board-user@host]
 ```
-Defaults to `$BOARD_HOST`, or `arduino@10.0.0.245` if unset. Requires SSH key-based access to the board (`ssh-copy-id`, or manually append the pubkey to the board's `~/.ssh/authorized_keys` — password auth doesn't work non-interactively). The script pushes `sketch/`, `python/` (except `python/model/`, uploaded once and then left alone — see below), and `app.yaml` to `~/ArduinoApps/smoothsensors03/` on the board via `tar` over `ssh` (the board has no `rsync`), then runs `arduino-app-cli app restart` there.
+Defaults to `$BOARD_HOST`, or `arduino@10.0.0.195` if unset. Requires SSH key-based access to the board (run `python scripts/setup_ssh_key.py` once — password auth doesn't work non-interactively). The script pushes `sketch/`, `python/` (except `python/model/`, uploaded once and then left alone — see below), and `app.yaml` to `~/ArduinoApps/smoothsensors03/` on the board via `tar` over `ssh` (the board has no `rsync`), then runs `arduino-app-cli app restart` there.
 
 Managing the running app directly via SSH (`app_path` is `ArduinoApps/smoothsensors03` on the board):
 ```
