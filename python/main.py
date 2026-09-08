@@ -21,9 +21,9 @@ class MainClass:
         Initializer for MainClass.
         """
         print("\n\nsmoothsensors03\n\n")
-        self.previous: datetime = datetime.now()
-        self.voice = VoiceCommands()
-        self.led_codes = {
+        self._previous: datetime = datetime.now()
+        self._voice = VoiceCommands()
+        self._led_codes = {
             "go_ahead":   "ga",
             "go_back":    "gb",
             "turn_right": "tr",
@@ -38,14 +38,14 @@ class MainClass:
         to the Arduino via the Bridge.
         It also prints a message every 10 seconds to show that the loop is running.
         """
-        command = self.voice.poll()
+        command = self._voice.poll()
         if command is not None:
             print(f"{datetime.now()} Voice command recognized: {command}")
-            Bridge.call("show_text", self.led_codes[command])
+            Bridge.call("show_text", self._led_codes[command])
             Bridge.call("move", command)
-        if (datetime.now() - self.previous).seconds > 10:
+        if (datetime.now() - self._previous).seconds > 10:
             print(f"{datetime.now()} PY")
-            self.previous = datetime.now()
+            self._previous = datetime.now()
         time.sleep(0.1)
 
 main = MainClass()
