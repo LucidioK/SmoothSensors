@@ -82,6 +82,7 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 | `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands. Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
 | `requirements.txt` | Python dependencies for the Linux side (currently just `vosk`, the offline speech recognizer). |
 | `model/` | *(not checked in, gitignored)* The Vosk speech model, tens of MB. Uploaded once by `scripts/deploy.sh` the first time it's missing on the board, then left alone on subsequent deploys. |
+| `tests/test_python_app.py` | Unit tests for `VoiceCommands.py` and `main.py`. Runs off-board by stubbing `vosk`, `arduino.app_utils`, and the `arecord` subprocess. Run with `python -m unittest discover -s python/tests -v`. |
 
 ### `scripts/` — deploy and diagnostic tooling
 
