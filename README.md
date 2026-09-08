@@ -52,6 +52,44 @@ The chassis was optimized to use as little material and to print as fast as poss
 
 * File [RobotChassis03Split.dwg](cad/RobotChassis03Split.dwg) is the 3D model, it was done in AutoCAD.
 * File [RobotChassis03.3mf](cad/RobotChassis03.3mf) is the Creality print file for all the parts in one print.
+* File [RobotChassis03.stl](cad/RobotChassis03.stl) is the full assembled chassis as a single mesh, provided so it previews directly on GitHub (the split part files above don't render individually).
+* File [Chassis.png](cad/Chassis.png) is the rendered preview image shown above.
+
+## Repository structure
+
+This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project: an MCU-side sketch and a Linux-side Python app that run simultaneously on the Uno Q and talk to each other over RPC.
+
+* `app.yaml` — the App Lab manifest that ties the `sketch/` and `python/` halves together into a single deployable app (`SmoothSensors03`).
+* `SPEC.md` — the full project specification (hardware, architecture, behaviors, safety interlocks) for the robot, including parts not yet built.
+* `PHASE1.md` — the current build phase broken into ordered, individually testable scenarios (non-vision voice commands, motors, safety), scoped down from `SPEC.md`.
+
+### `sketch/` — MCU-side C++ program (Zephyr RTOS)
+
+| File | Description |
+|------|--------------|
+| `sketch.ino` | Main entry point. Wires up the sensors/actuators, exposes `show_text` and `move` to Python over `Bridge`, and drives the main loop (record sensor samples every iteration, print status to the Serial Monitor once a second, auto-stop when an obstacle is closer than 10cm). |
+| `SmoothDistance.h` | Wraps the `ModulinoDistance` (VL53L4 time-of-flight) sensor in a circular buffer that averages readings after dropping the min/max outlier, exposed via `getDistanceCm()`. |
+| `SmoothMovement.h` | Same outlier-rejecting smoothing technique as `SmoothDistance.h`, applied to the `ModulinoMovement` IMU; exposes smoothed accelerometer and roll/pitch/yaw via `get(...)`. |
+| `RobotMotors.h` | Wraps the `ModulinoMotors` dual H-bridge driver; translates command strings (`go_ahead`/`go_back`/`turn_right`/`turn_left`/`stop`) into motor drive calls and reports status via `getStatus()`. |
+| `LedMatrixDisplay.h` | Wraps the Uno Q's built-in 8x13 LED matrix (`ArduinoLEDMatrix`) to print short (3-character) status codes, e.g. `rdy`, `ga`, `st`. |
+| `sketch.yaml` | Pins the `arduino:zephyr` platform and exact versions for every Arduino library the sketch depends on (Modulino, RouterBridge, LSM6DSOX, LIS3MDL magnetometer, etc.), so profile-based builds don't depend on globally installed libraries. |
+
+### `python/` — Linux-side Python app (`arduino.app_utils` App framework)
+
+| File | Description |
+|------|--------------|
+| `main.py` | App entry point. Polls `VoiceCommands` for a recognized command each loop iteration and forwards it to the MCU side via `Bridge.call("show_text", ...)` and `Bridge.call("move", ...)`. |
+| `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands. Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
+| `requirements.txt` | Python dependencies for the Linux side (currently just `vosk`, the offline speech recognizer). |
+| `model/` | *(not checked in, gitignored)* The Vosk speech model, tens of MB. Uploaded once by `scripts/deploy.sh` the first time it's missing on the board, then left alone on subsequent deploys. |
+
+### `scripts/` — deploy and diagnostic tooling
+
+| File | Description |
+|------|--------------|
+| `deploy.sh` | Pushes `sketch/`, `python/` (except `python/model/`), and `app.yaml` to the board over `tar`+`ssh`, then restarts the app via `arduino-app-cli`. Run from Linux/Mac/WSL. |
+| `deploy.ps1` | Windows PowerShell equivalent of `deploy.sh`; auto-detects the board's IP address. |
+| `diagnose_usb_mic.sh` | Diagnoses (and, with `--fix`, attempts to repair) USB host / microphone enumeration problems on the board's Linux side — e.g. forcing the board's dual-role USB-C port into host mode so a hub/mic enumerates correctly. Must be run **on the board**, not the PC (it inspects local kernel/sysfs USB state). Can be piped over SSH without copying it to the board first: `ssh <board-user@host> 'bash -s' -- --fix < scripts/diagnose_usb_mic.sh`. |
 
 ## If you are using WSL (Windows System for Linux)
 
