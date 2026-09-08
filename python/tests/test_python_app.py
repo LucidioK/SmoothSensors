@@ -184,11 +184,11 @@ class MainModuleTests(unittest.TestCase):
     def setUp(self):
         fake_app_utils.Bridge.reset_mock()
         self.instance = main_module.MainClass()
-        self.instance.voice = mock.MagicMock(name="VoiceCommands")
+        self.instance._voice = mock.MagicMock(name="VoiceCommands")
 
     def test_init_builds_the_led_code_table_and_a_voice_recognizer(self):
         self.assertEqual(
-            self.instance.led_codes,
+            self.instance._led_codes,
             {
                 "go_ahead": "ga",
                 "go_back": "gb",
@@ -197,22 +197,22 @@ class MainModuleTests(unittest.TestCase):
                 "stop": "st",
             },
         )
-        self.assertIsInstance(self.instance.previous, datetime)
+        self.assertIsInstance(self.instance._previous, datetime)
 
     def test_loop_does_nothing_when_no_command_is_recognized(self):
-        self.instance.voice.poll.return_value = None
-        self.instance.previous = datetime.now()
+        self.instance._voice.poll.return_value = None
+        self.instance._previous = datetime.now()
         with mock.patch("time.sleep") as fake_sleep:
             self.instance.loop()
         fake_app_utils.Bridge.call.assert_not_called()
         fake_sleep.assert_called_once_with(0.1)
 
     def test_loop_forwards_every_recognized_command_to_the_bridge(self):
-        for command, code in self.instance.led_codes.items():
+        for command, code in self.instance._led_codes.items():
             with self.subTest(command=command):
                 fake_app_utils.Bridge.reset_mock()
-                self.instance.voice.poll.return_value = command
-                self.instance.previous = datetime.now()
+                self.instance._voice.poll.return_value = command
+                self.instance._previous = datetime.now()
                 with mock.patch("time.sleep"):
                     self.instance.loop()
                 fake_app_utils.Bridge.call.assert_any_call("show_text", code)
@@ -220,19 +220,19 @@ class MainModuleTests(unittest.TestCase):
                 self.assertEqual(fake_app_utils.Bridge.call.call_count, 2)
 
     def test_loop_resets_heartbeat_after_ten_seconds_elapse(self):
-        self.instance.voice.poll.return_value = None
-        self.instance.previous = datetime.now() - timedelta(seconds=11)
+        self.instance._voice.poll.return_value = None
+        self.instance._previous = datetime.now() - timedelta(seconds=11)
         with mock.patch("time.sleep"):
             self.instance.loop()
-        self.assertLess((datetime.now() - self.instance.previous).total_seconds(), 1)
+        self.assertLess((datetime.now() - self.instance._previous).total_seconds(), 1)
 
     def test_loop_leaves_heartbeat_untouched_before_ten_seconds(self):
-        self.instance.voice.poll.return_value = None
+        self.instance._voice.poll.return_value = None
         recent = datetime.now() - timedelta(seconds=2)
-        self.instance.previous = recent
+        self.instance._previous = recent
         with mock.patch("time.sleep"):
             self.instance.loop()
-        self.assertEqual(self.instance.previous, recent)
+        self.assertEqual(self.instance._previous, recent)
 
     def test_module_level_loop_delegates_to_the_singleton_instance(self):
         with mock.patch.object(main_module.main, "loop") as fake_loop:
