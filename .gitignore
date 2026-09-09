@@ -1,6 +1,9 @@
 # ignore app cache folder
 .cache/
 
+# Ignore VS Code settings folder
+.vscode/
+
 arduino-cli-help.txt
 ssh_*
 id_*
