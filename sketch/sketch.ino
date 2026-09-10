@@ -48,6 +48,8 @@ private:
   bool _distanceOk = false;
   /// @brief Whether the movement sensor initialized successfully.
   bool _movementOk = false;
+  /// @brief Whether the motors initialized successfully.
+  bool _motorsOk = false;
   /// @brief Whether the obstacle warning is currently active.
   bool _alreadyAlertedAboutDistance = false;
   /// @brief Whether the startup banner has already been printed.
@@ -92,6 +94,61 @@ private:
     Monitor.print(_robotMotors.getStatus());
   }
 
+
+  void _monitorDistance(int now) {
+    _distanceCm = _distance.getDistanceCm();
+    if (now - _previousDistanceRead > STATUS_TIMESPAN_WHEN_MOVING_MS / 10)
+    {
+      // Refresh the distance reading more often than the status output.
+      _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
+      _previousDistanceRead = now;
+      if (_distanceCm < 10) {
+        move("stop");
+        if (_motorsOk) {
+          // Convert the short distance value before displaying it on the matrix.
+          char buf[4];
+          show_text(String(itoa(_distanceCm, buf, 10)));
+        }
+        _alreadyAlertedAboutDistance = true;
+      }
+      else if (_alreadyAlertedAboutDistance) {
+        _alreadyAlertedAboutDistance = false;
+        if (_motorsOk) {
+          show_text("_");
+        }
+      }
+    }
+  }
+
+  void _showMonitorLine(int now) {
+    int timespan = now - _previousTimestamp;
+    if (timespan > STATUS_TIMESPAN_WHEN_MOVING_MS)
+    {
+      Monitor.flush();
+  
+      if (!_alreadyShowedAppName) {
+        // Monitor.println many times does not work in setup()
+        Monitor.println();
+        Monitor.println("=========================== SmoothSensors003...");
+        Monitor.println();
+        _alreadyShowedAppName = true;
+      }
+
+      _hl = (_hl == HIGH) ? LOW : HIGH;
+      digitalWrite(LED_BUILTIN, _hl);
+      _previousTimestamp = now;
+
+      _showDistance();
+
+      _showMovement();
+
+      _showMotorStatus();
+
+      Monitor.println();
+      Monitor.flush();
+    }
+  }
+
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
   SketchClass() {
@@ -122,17 +179,20 @@ public:
     _distanceOk = _distance.initialize();
     _movementOk = _movement.initialize();
     _ledMatrix.initialize();
-    _robotMotors.initialize();
+    _motorsOk = _robotMotors.initialize();
 
     // Display the ready status on the LED matrix.
-    show_text("rdy");
+    if (_motorsOk) {
+      show_text("rdy");
+    } else {
+      show_text("e1");
+    }
   }
 
   /// @brief Records sensors and periodically reports status or stops at obstacles.
   void loop() {
     // Current loop timestamp and elapsed time since the last status report.
     int now = millis();
-    int timespan = now - _previousTimestamp;
   
     if (_distanceOk) {
       _distance.record();
@@ -142,50 +202,9 @@ public:
       _movement.record();
     }
   
-    if (now - _previousDistanceRead > STATUS_TIMESPAN_WHEN_MOVING_MS / 10)
-    {
-      // Refresh the distance reading more often than the status output.
-      _distanceCm = _distance.getDistanceCm();
-      _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
-      _previousDistanceRead = now;
-      if (_distanceCm < 10) {
-        move("stop");
-        // Convert the short distance value before displaying it on the matrix.
-        char buf[4];
-        show_text(String(itoa(_distanceCm, buf, 10)));
-        _alreadyAlertedAboutDistance = true;
-      }
-      else if (_alreadyAlertedAboutDistance) {
-        _alreadyAlertedAboutDistance = false;
-        show_text("_");
-      }
-    }
+    _monitorDistance(now);
+    _showMonitorLine(now);
   
-    if (timespan > STATUS_TIMESPAN_WHEN_MOVING_MS)
-    {
-      Monitor.flush();
-  
-      if (!_alreadyShowedAppName) {
-        // Monitor.println many times does not work in setup()
-        Monitor.println();
-        Monitor.println("=========================== SmoothSensors003...");
-        Monitor.println();
-        _alreadyShowedAppName = true;
-      }
-
-      _hl = (_hl == HIGH) ? LOW : HIGH;
-      digitalWrite(LED_BUILTIN, _hl);
-      _previousTimestamp = now;
-
-      _showDistance();
-
-      _showMovement();
-
-      _showMotorStatus();
-
-        Monitor.println();
-      Monitor.flush();
-    }
   }
 
   /// @brief Writes an RPC text command to the LED matrix.
@@ -202,6 +221,9 @@ public:
 
     return _robotMotors.move(command);
   }
+
+  /// @brief Whether the motors initialized successfully.
+  bool isMotorOk() { return _motorsOk; }
 };
 
 // Global controller used by the Arduino framework callbacks and RPC handlers.
@@ -216,6 +238,11 @@ bool show_text(String text)
 // Forwards the global movement RPC to the sketch controller.
 bool move(String command)
 {
+  if (!sketch.isMotorOk())
+  {
+    show_text("e1");
+    return false;
+  }
   return sketch.moveImplementation(command);
 }
 
