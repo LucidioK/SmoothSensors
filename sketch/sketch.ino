@@ -2,6 +2,7 @@
 #include <Arduino_RouterBridge.h>
 #include <Arduino_Modulino.h>
 #include <Wire.h>
+#include "SmoothCompass.h"
 #include "SmoothDistance.h"
 #include "SmoothMovement.h"
 #include "LedMatrixDisplay.h"
@@ -30,6 +31,8 @@ private:
   LedMatrixDisplay _ledMatrix;
   /// @brief Instance of the RobotMotors class for managing the robot's motors.
   RobotMotors _robotMotors;
+  /// @brief Instance of the SmoothCompass class for reading robot bearings with relation to Earth.
+  SmoothCompass _compass;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -46,6 +49,8 @@ private:
   int _minimumDistance = 10;
   /// @brief Whether the distance sensor initialized successfully.
   bool _distanceOk = false;
+  /// @brief Whether the compass sensor initialized successfully.
+  bool _compassOk = false;
   /// @brief Whether the movement sensor initialized successfully.
   bool _movementOk = false;
   /// @brief Whether the motors initialized successfully.
@@ -92,6 +97,17 @@ private:
   void _showMotorStatus() {
     Monitor.print(" MOT: ");
     Monitor.print(_robotMotors.getStatus());
+  }
+
+  void _showCompass() {
+    Monitor.print(" CMP: ");
+    Monitor.print(_compass.getError());
+    if (_compassOk) {
+      Monitor.print(" ");
+      Monitor.print(_compass.getDirectionAngle());
+      Monitor.print(" ");
+      Monitor.print(_compass.getDirectionBearing());
+    }
   }
 
 
@@ -144,6 +160,8 @@ private:
 
       _showMotorStatus();
 
+      _showCompass();
+
       Monitor.println();
       Monitor.flush();
     }
@@ -178,6 +196,7 @@ public:
     // Initialize the distance sensor, movement sensor, LED matrix display, and robot motors.
     _distanceOk = _distance.initialize();
     _movementOk = _movement.initialize();
+    _compassOk  = _compass.initialize();
     _ledMatrix.initialize();
     _motorsOk = _robotMotors.initialize();
 
@@ -193,7 +212,11 @@ public:
   void loop() {
     // Current loop timestamp and elapsed time since the last status report.
     int now = millis();
-  
+
+    if (_compassOk) {
+      _compass.record();
+    }
+    
     if (_distanceOk) {
       _distance.record();
     }

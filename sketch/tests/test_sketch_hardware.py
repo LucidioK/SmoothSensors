@@ -204,6 +204,12 @@ class SketchHardwareTests(unittest.TestCase):
             "no RobotMotors status line -- robotMotors.getStatus() may be failing",
         )
 
+    def test_compass_status_reported(self):
+        self.assertIn(
+            "CMP:", CAPTURED_MCU_MONITOR,
+            "no Compass status line -- compass.getStatus() may be failing",
+        )
+
     def test_python_loop_heartbeat_reported(self):
         self.assertRegex(
             CAPTURED_APP_LOGS, r"\bPY\b",
