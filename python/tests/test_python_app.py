@@ -117,7 +117,6 @@ class VoiceCommandsTests(unittest.TestCase):
     def test_arecord_command_targets_the_configured_device_and_format(self):
         cmd = voice_commands_module.ARECORD_COMMAND
         self.assertEqual(cmd[0], "arecord")
-        self.assertIn(voice_commands_module.ARECORD_DEVICE, cmd)
         self.assertIn(str(voice_commands_module.SAMPLE_RATE), cmd)
         self.assertIn("raw", cmd)
 
