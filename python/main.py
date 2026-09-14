@@ -30,6 +30,14 @@ class MainClass:
             "turn_left":  "tl",
             "stop":       "st",
             "calibrate_compass": "cal",
+            "point_north": "pN",
+            "point_northeast": "pNE",
+            "point_east": "pE",
+            "point_southeast": "pSE",
+            "point_south": "pS",
+            "point_southwest": "pSW",
+            "point_west": "pW",
+            "point_northwest": "pNW",
         }
 
     def loop(self) -> None:

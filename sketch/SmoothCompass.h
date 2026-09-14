@@ -226,6 +226,7 @@ public:
   float getScaleX() { return _scale_x; }
   float getScaleY() { return _scale_y; }
   float getCalibrationRadius() { return _cal_radius; }
+  static unsigned int getSampleCount() { return REGISTER_COUNT; }
 };
 
 #endif

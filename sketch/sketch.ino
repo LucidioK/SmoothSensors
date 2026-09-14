@@ -8,6 +8,7 @@
 #include "LedMatrixDisplay.h"
 #include "RobotMotors.h"
 
+
 // Sentinel distance used when the distance sensor has no usable reading.
 #define INFINITE_DISTANCE 1000000
 // Status output interval while the robot is stationary.
@@ -24,6 +25,12 @@
 // accepting a spin that barely moved (e.g. stuck/lifted) just because the raw magnetic span happened to clear
 // SmoothCompass's own (much smaller) noise-floor check.
 #define CALIBRATION_MIN_VALID_DEGREES 300.0f
+// Heading tolerance for "close enough" to a point-to-bearing target, absorbing residual smoothing lag and post-calibration magnetic noise.
+#define POINT_TOLERANCE_DEGREES 8.0f
+// Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle.
+#define POINT_TIMEOUT_MS 8000
+// Minimum dwell time after stopping before trusting a heading reading, giving the ring buffer time to refill with post-stop samples.
+#define POINT_SETTLE_MS 500
 
 // RPC handler that writes a short message to the LED matrix.
 bool show_text(String text);
@@ -77,13 +84,87 @@ private:
   int   _calibrationLastTick = 0;
   /// @brief Cumulative rotation, in degrees, accumulated during the current calibration spin.
   float _calibrationDegrees = 0;
+  /// @brief Whether a compass calibration has succeeded at least once since boot; point-to-bearing refuses to run until this is true.
+  bool _compassCalibratedThisBoot = false;
+  /// @brief States for a point-to-bearing turn: idle, actively turning, or settling before re-checking heading.
+  enum PointState { POINT_IDLE, POINT_TURNING, POINT_SETTLING };
+  /// @brief Current state of any in-progress point-to-bearing turn.
+  PointState _pointState = POINT_IDLE;
+  /// @brief RPC command string for the current point-to-bearing turn (e.g. "point_north"), kept for Monitor output and re-trigger detection.
+  String _pointCommand = "";
+  /// @brief Target heading, in degrees, for the current point-to-bearing turn.
+  float _pointTargetDegrees = 0;
+  /// @brief Timestamp when the current point-to-bearing operation started; bounds the whole operation via POINT_TIMEOUT_MS.
+  int _pointStartedAt = 0;
+  /// @brief Timestamp when the current settle period began.
+  int _pointSettleStartedAt = 0;
+  /// @brief Loop iterations elapsed during the current settle period; waited until >= SmoothCompass::getSampleCount() before trusting the ring buffer.
+  unsigned int _pointSettleSamples = 0;
+  /// @brief Signed heading error (degrees) from the previous iteration, used to detect a sign flip (overshoot) between loop iterations.
+  float _pointLastError = 0;
+  ///
+
+  template <typename T> int _intJust(T num, int size) {
+    int numberOfDigits = (int)num == 0 ? 1 : 0;
+    int isNegative = num < 0 ? 1 : 0;
+    for (int n = abs((int)num); n > 0;  numberOfDigits++, n /= 10);
+    int just = max(0, size - numberOfDigits - isNegative);    
+    return just;
+  }
+
+  void _printLeftJustified(int num, int size) {
+    int just = _intJust(num, size);
+    for (int i = 0; i < just; i++) {
+      Monitor.print(" ");
+    }
+    Monitor.print(num);
+  }
+
+  void _printLeftJustified(float num, int size) {
+    int just = _intJust(num, size - 3);
+    for (int i = 0; i < just; i++) {
+      Monitor.print(" ");
+    }
+    Monitor.print(num, 2);
+  }
+
+  void _printLeftJustified(String s, int size) {
+    int just = max(size - s.length(), 0);
+    
+    for (int i = 0; i < just; i++) {
+      Monitor.print(" ");
+    }
+    Monitor.print(s);
+  }
+
+  /// @brief Looks up the target heading (degrees) for a "point_*" RPC command string. Returns false if the command isn't a point-to-bearing command.
+  bool _bearingTargetDegrees(const String& command, float* degrees) {
+    struct BearingEntry { const char* command; float degrees; };
+    static const BearingEntry BEARINGS[] = {
+      { "point_north",     0.0f },
+      { "point_northeast", 45.0f },
+      { "point_east",      90.0f },
+      { "point_southeast", 135.0f },
+      { "point_south",     180.0f },
+      { "point_southwest", 225.0f },
+      { "point_west",      270.0f },
+      { "point_northwest", 315.0f },
+    };
+    for (unsigned int i = 0; i < sizeof(BEARINGS) / sizeof(BEARINGS[0]); i++) {
+      if (command == BEARINGS[i].command) {
+        *degrees = BEARINGS[i].degrees;
+        return true;
+      }
+    }
+    return false;
+  }
 
   /// @brief Prints the current distance sensor status to the monitor.
     void _showDistance() {
       if (_distanceOk)
       {
         Monitor.print(" DST: ");
-        Monitor.print(_distanceCm);
+        _printLeftJustified(_distanceCm, 3);
         Monitor.print("cm");
       }
       else
@@ -98,12 +179,12 @@ private:
       // Smoothed acceleration and rotation values for each sensor axis.
       float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
       _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
-      Monitor.print(" ax="); Monitor.print(ax);
-      Monitor.print(" ay="); Monitor.print(ay);
-      Monitor.print(" az="); Monitor.print(az);
-      Monitor.print(" rx="); Monitor.print(rx);
-      Monitor.print(" ry="); Monitor.print(ry);
-      Monitor.print(" rz="); Monitor.print(rz);
+      Monitor.print(" ax="); _printLeftJustified(ax, 6);
+      Monitor.print(" ay="); _printLeftJustified(ay, 6);
+      Monitor.print(" az="); _printLeftJustified(az, 6);
+      Monitor.print(" rx="); _printLeftJustified(rx, 6);
+      Monitor.print(" ry="); _printLeftJustified(ry, 6);
+      Monitor.print(" rz="); _printLeftJustified(rz, 6);
     }
     else
     {
@@ -122,9 +203,9 @@ private:
     Monitor.print(_compass.getError());
     if (_compassOk) {
       Monitor.print(" ");
-      Monitor.print(_compass.getDirectionAngle());
+      _printLeftJustified(_compass.getDirectionAngle(), 6);
       Monitor.print(" ");
-      Monitor.print(_compass.getDirectionBearing());
+      _printLeftJustified(_compass.getDirectionBearing(), 3);
     }
   }
 
@@ -132,19 +213,29 @@ private:
   void _showCalibration() {
     if (_calibrating) {
       Monitor.print(" CAL: ");
-      Monitor.print(_calibrationDegrees, 1);
+      _printLeftJustified(_calibrationDegrees, 6);
       Monitor.print("deg");
+    }
+  }
+
+  /// @brief Prints the point-to-bearing turn's target/current heading while one is in progress.
+  void _showPointing() {
+    if (_pointState != POINT_IDLE) {
+      Monitor.print(" PNT: ");
+      Monitor.print(_pointCommand);
+      Monitor.print(" target=");_printLeftJustified(_pointTargetDegrees, 6);
+      Monitor.print(" err=");   _printLeftJustified(_headingError(_pointTargetDegrees), 6);
     }
   }
 
   void _monitorDistance(int now) {
     _distanceCm = _distance.getDistanceCm();
-    if (now - _previousDistanceRead > STATUS_TIMESPAN_WHEN_MOVING_MS / 10)
+    if (now - _previousDistanceRead > _statusTimeSpan / 10)
     {
       // Refresh the distance reading more often than the status output.
       _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
       _previousDistanceRead = now;
-      if (!_calibrating) {
+      if (!_calibrating && _pointState == POINT_IDLE) {
         if (_distanceCm < 10) {
           move("stop");
           if (_motorsOk) {
@@ -171,7 +262,7 @@ private:
     _calibrationLastTick = now;
     float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
     _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
-    float rate = fabs(rz);
+    float rate = fabsf(rz);
     // Below this rate, treat rz as gyro zero-bias noise rather than real rotation, to avoid slowly accumulating phantom degrees while stationary.
     if (rate > CALIBRATION_RZ_DEADBAND_DPS) {
       _calibrationDegrees += rate * dt / 1000.0f;
@@ -189,6 +280,9 @@ private:
       show_text("e2");
       return false;
     }
+    Monitor.println();
+    Monitor.println("--- STARTING COMPASS CALIBRATION ---");
+    Monitor.println();
     _compass.startCalibration();
     _calibrationDegrees = 0;
     _calibrationStartedAt = _calibrationLastTick = millis();
@@ -207,13 +301,14 @@ private:
     bool ok;
     if (_calibrationDegrees >= CALIBRATION_MIN_VALID_DEGREES) {
       ok = _compass.finishCalibration();
+      if (ok) _compassCalibratedThisBoot = true;
     } else {
       _compass.cancelCalibration();
       ok = false;
     }
 
     Monitor.println();
-    Monitor.println("--- COMPASS CALIBRATION ---");
+    Monitor.println("--- FINISH COMPASS CALIBRATION ---");
     Monitor.print("spin="); Monitor.print(_calibrationDegrees, 2);
     Monitor.print(" deg  timeout="); Monitor.print(timedOut ? "yes" : "no");
     Monitor.print("  samples_ok="); Monitor.println(ok ? "yes" : "no");
@@ -243,9 +338,123 @@ private:
     show_text(ok ? "cal" : "e3");
   }
 
+  /// @brief Signed angular error (degrees) from the current calibrated heading to a target, normalized to (-180, 180].
+  float _headingError(float targetDegrees) {
+    float error = targetDegrees - _compass.getDirectionAngle();
+    while (error > 180.0f) error -= 360.0f;
+    while (error <= -180.0f) error += 360.0f;
+    return error;
+  }
+
+  /// @brief Chooses the shorter-way turn direction for a signed heading error. turn_right increases the reported
+  /// heading (confirmed empirically against real hardware), so a positive error turns right.
+  const char* _turnCommandFor(float error) {
+    return error >= 0 ? "turn_right" : "turn_left";
+  }
+
+  /// @brief Starts a closed-loop turn toward a target bearing, if the compass has been calibrated this boot and required sensors/motors are ready.
+  bool _startPointing(const String& command, float targetDegrees) {
+    if (!(_compassOk && _movementOk && _motorsOk)) {
+      show_text("e5");
+      return false;
+    }
+    if (!_compassCalibratedThisBoot) {
+      show_text("e6");
+      return false;
+    }
+    _pointCommand = command;
+    _pointTargetDegrees = targetDegrees;
+    _pointStartedAt = millis();
+    _pointLastError = _headingError(targetDegrees);
+    _alreadyAlertedAboutDistance = false;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_MOVING_MS;
+    if (fabsf(_pointLastError) <= POINT_TOLERANCE_DEGREES) {
+      // Already facing the target bearing: stop any prior motion and skip straight to settling instead of turning.
+      _robotMotors.move("stop");
+      _pointState = POINT_SETTLING;
+      _pointSettleStartedAt = millis();
+      _pointSettleSamples = 0;
+    } else {
+      _pointState = POINT_TURNING;
+      _robotMotors.move(_turnCommandFor(_pointLastError));
+    }
+    return true;
+  }
+
+  /// @brief Advances a point-to-bearing turn via a turn/settle/re-check cycle (a single-pass stop would overshoot,
+  /// since SmoothCompass::getDirectionAngle() lags the true heading while actively spinning), bounded by POINT_TIMEOUT_MS.
+  void _updatePointing(int now) {
+    if (_pointState == POINT_IDLE) return;
+
+    if (now - _pointStartedAt >= POINT_TIMEOUT_MS) {
+      _finishPointing(true);
+      return;
+    }
+
+    if (_pointState == POINT_TURNING) {
+      float error = _headingError(_pointTargetDegrees);
+      // Guards against jumping past the tolerance band between loop iterations: a sign flip while the
+      // previous error was still small means the turn just crossed the target.
+      bool signFlipped = (error > 0) != (_pointLastError > 0) && fabsf(_pointLastError) < 90.0f;
+      if (fabsf(error) <= POINT_TOLERANCE_DEGREES || signFlipped) {
+        _robotMotors.move("stop");
+        _pointState = POINT_SETTLING;
+        _pointSettleStartedAt = now;
+        _pointSettleSamples = 0;
+      }
+      _pointLastError = error;
+    } else if (_pointState == POINT_SETTLING) {
+      _pointSettleSamples++;
+      if (now - _pointSettleStartedAt >= POINT_SETTLE_MS && _pointSettleSamples >= SmoothCompass::getSampleCount()) {
+        float error = _headingError(_pointTargetDegrees);
+        if (fabsf(error) <= POINT_TOLERANCE_DEGREES) {
+          _finishPointing(false);
+        } else {
+          _pointLastError = error;
+          _pointState = POINT_TURNING;
+          _robotMotors.move(_turnCommandFor(error));
+        }
+      }
+    }
+  }
+
+  /// @brief Stops the point-to-bearing turn and reports the result.
+  void _finishPointing(bool timedOut) {
+    _robotMotors.move("stop");
+    _pointState = POINT_IDLE;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+    float finalError = _headingError(_pointTargetDegrees);
+
+    Monitor.println();
+    Monitor.println("--- POINT TO BEARING ---");
+    Monitor.print(_pointCommand); Monitor.print(" target="); Monitor.print(_pointTargetDegrees, 1);
+    Monitor.print(" heading="); Monitor.print(_compass.getDirectionAngle(), 1);
+    Monitor.print(" error="); Monitor.print(finalError, 1);
+    Monitor.print(" timeout="); Monitor.println(timedOut ? "yes" : "no");
+    Monitor.println("-------------------------");
+    Monitor.flush();
+
+    show_text(timedOut ? "e4" : "ok");
+  }
+
+  /// @brief Cancels an in-progress point-to-bearing turn without writing a result to the display (the incoming command's own code takes over).
+  void _cancelPointing() {
+    _robotMotors.move("stop");
+    _pointState = POINT_IDLE;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+  }
+
+  /// @brief Cancels an in-progress compass calibration spin without writing a result to the display.
+  void _cancelCalibration() {
+    _robotMotors.move("stop");
+    _calibrating = false;
+    _compass.cancelCalibration();
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+  }
+
   void _showMonitorLine(int now) {
     int timespan = now - _previousTimestamp;
-    if (timespan > STATUS_TIMESPAN_WHEN_MOVING_MS)
+    if (timespan > _statusTimeSpan)
     {
       Monitor.flush();
   
@@ -254,6 +463,7 @@ private:
         Monitor.println();
         Monitor.println("=========================== SmoothSensors003...");
         Monitor.println();
+        Monitor.flush();
         _alreadyShowedAppName = true;
       }
 
@@ -270,6 +480,8 @@ private:
       _showCompass();
 
       _showCalibration();
+
+      _showPointing();
 
       Monitor.println();
       Monitor.flush();
@@ -335,6 +547,7 @@ public:
     }
   
     _updateCalibration(now);
+    _updatePointing(now);
 
     _monitorDistance(now);
     _showMonitorLine(now);
@@ -351,19 +564,40 @@ public:
   /// @brief Applies an RPC movement command and updates the report interval.
   bool moveImplementation(String command)
   {
+    float targetDegrees = 0.0f;
+    bool isBearingCommand = _bearingTargetDegrees(command, &targetDegrees);
+    bool alreadyStopped = false;
+
     if (_calibrating) {
       if (command == "calibrate_compass") {
         // Already calibrating: ignore the repeat trigger and let the in-progress spin continue.
         return true;
       }
-      _robotMotors.move("stop");
-      _calibrating = false;
-      _compass.cancelCalibration();
-      _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+      _cancelCalibration();
+      alreadyStopped = true;
+    }
+
+    if (_pointState != POINT_IDLE) {
+      if (isBearingCommand && command == _pointCommand) {
+        // Already turning toward this exact bearing: ignore the repeat trigger and let it continue.
+        return true;
+      }
+      _cancelPointing();
+      alreadyStopped = true;
     }
 
     if (command == "calibrate_compass") {
       return _startCalibration();
+    }
+
+    if (isBearingCommand) {
+      return _startPointing(command, targetDegrees);
+    }
+
+    if (alreadyStopped && command == "stop") {
+      // A cancellation above already stopped the motors (which blocks ~400ms); avoid stopping twice.
+      _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+      return true;
     }
 
     _statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
