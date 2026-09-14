@@ -10,8 +10,12 @@
 set -euo pipefail
 
 BOARD_IP="${1:-${BOARD_IP:-10.0.0.195}}"
-ping -c 1 "$BOARD_IP" >/dev/null || { echo "==> ERROR: Board not reachable at ${BOARD_IP} (check BOARD_IP or network)"; exit 1; }
 BOARD_HOST="${1:-${BOARD_HOST:-arduino@${BOARD_IP}}}"
+# SSH-based reachability check (not ping): portable across shells where `ping` may
+# resolve to a non-POSIX binary (e.g. Windows ping.exe, whose `-c` means "compartment"
+# and requires admin rights rather than "count"), and it tests the thing that actually
+# matters -- SSH access -- rather than raw ICMP, which some networks block anyway.
+ssh -o ConnectTimeout=5 -o BatchMode=yes "$BOARD_HOST" true 2>/dev/null || { echo "==> ERROR: Board not reachable via SSH at ${BOARD_HOST} (check BOARD_IP/BOARD_HOST, network, or run scripts/setup_ssh_key.py)"; exit 1; }
 APP_NAME="smoothsensors03"
 REMOTE_DIR="ArduinoApps/${APP_NAME}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

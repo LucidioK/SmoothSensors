@@ -7,6 +7,7 @@ The recognized commands are:
     "turn right"
     "turn left"
     "stop"
+    "calibrate"
 The recognized commands are prefixed with the wake word "robot".
 The recognized commands are also printed to the console.
 """
@@ -30,6 +31,7 @@ COMMANDS = {
     "turn right": "turn_right",
     "turn left":  "turn_left",
     "stop":       "stop",
+    "calibrate":  "calibrate_compass",
 }
 
 GRAMMAR = json.dumps([f"{WAKE_WORD} {phrase}" for phrase in COMMANDS] + ["[unk]"])
