@@ -29,6 +29,7 @@ class MainClass:
             "turn_right": "tr",
             "turn_left":  "tl",
             "stop":       "st",
+            "calibrate_compass": "cal",
         }
 
     def loop(self) -> None:

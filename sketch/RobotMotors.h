@@ -42,7 +42,7 @@ public:
       _motors.setSpeedA(DRIVE_SPEED);
       _motors.setSpeedB(DRIVE_SPEED);
     }
-    if (command == "go_back")
+    else if (command == "go_back")
     {
       _status = "GBK";
       _motors.setInvertA(false);

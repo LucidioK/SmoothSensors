@@ -14,6 +14,16 @@
 #define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
 // Status output interval while the robot is moving.
 #define STATUS_TIMESPAN_WHEN_MOVING_MS 200
+// Cumulative rotation (degrees) at which a compass calibration spin stops; overshoots 360 to absorb gyro lag/undershoot.
+#define CALIBRATION_TARGET_DEGREES 380.0f
+// Hard timeout for a calibration spin, guarding against the robot being stuck or lifted mid-spin.
+#define CALIBRATION_TIMEOUT_MS     8000
+// Gyro Z-axis rate below which rotation is treated as zero-bias noise rather than real motion, during calibration.
+#define CALIBRATION_RZ_DEADBAND_DPS 3.0f
+// Minimum accumulated rotation (degrees) for a calibration spin to be considered valid; guards against
+// accepting a spin that barely moved (e.g. stuck/lifted) just because the raw magnetic span happened to clear
+// SmoothCompass's own (much smaller) noise-floor check.
+#define CALIBRATION_MIN_VALID_DEGREES 300.0f
 
 // RPC handler that writes a short message to the LED matrix.
 bool show_text(String text);
@@ -59,6 +69,14 @@ private:
   bool _alreadyAlertedAboutDistance = false;
   /// @brief Whether the startup banner has already been printed.
   bool _alreadyShowedAppName = false;
+  /// @brief Whether a compass calibration spin is currently in progress.
+  bool  _calibrating = false;
+  /// @brief Timestamp when the current calibration spin started.
+  int   _calibrationStartedAt = 0;
+  /// @brief Timestamp of the last calibration rotation-rate integration tick.
+  int   _calibrationLastTick = 0;
+  /// @brief Cumulative rotation, in degrees, accumulated during the current calibration spin.
+  float _calibrationDegrees = 0;
 
   /// @brief Prints the current distance sensor status to the monitor.
     void _showDistance() {
@@ -110,6 +128,14 @@ private:
     }
   }
 
+  /// @brief Prints the compass calibration spin's cumulative rotation while it is in progress.
+  void _showCalibration() {
+    if (_calibrating) {
+      Monitor.print(" CAL: ");
+      Monitor.print(_calibrationDegrees, 1);
+      Monitor.print("deg");
+    }
+  }
 
   void _monitorDistance(int now) {
     _distanceCm = _distance.getDistanceCm();
@@ -118,22 +144,103 @@ private:
       // Refresh the distance reading more often than the status output.
       _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
       _previousDistanceRead = now;
-      if (_distanceCm < 10) {
-        move("stop");
-        if (_motorsOk) {
-          // Convert the short distance value before displaying it on the matrix.
-          char buf[4];
-          show_text(String(itoa(_distanceCm, buf, 10)));
+      if (!_calibrating) {
+        if (_distanceCm < 10) {
+          move("stop");
+          if (_motorsOk) {
+            // Convert the short distance value before displaying it on the matrix.
+            char buf[4];
+            show_text(String(itoa(_distanceCm, buf, 10)));
+          }
+          _alreadyAlertedAboutDistance = true;
         }
-        _alreadyAlertedAboutDistance = true;
-      }
-      else if (_alreadyAlertedAboutDistance) {
-        _alreadyAlertedAboutDistance = false;
-        if (_motorsOk) {
-          show_text("_");
+        else if (_alreadyAlertedAboutDistance) {
+          _alreadyAlertedAboutDistance = false;
+          if (_motorsOk) {
+            show_text("_");
+          }
         }
       }
     }
+  }
+
+  /// @brief Integrates gyro rotation during a calibration spin and ends it once the target angle or timeout is reached.
+  void _updateCalibration(int now) {
+    if (!_calibrating) return;
+    int dt = now - _calibrationLastTick;
+    _calibrationLastTick = now;
+    float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
+    _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
+    float rate = fabs(rz);
+    // Below this rate, treat rz as gyro zero-bias noise rather than real rotation, to avoid slowly accumulating phantom degrees while stationary.
+    if (rate > CALIBRATION_RZ_DEADBAND_DPS) {
+      _calibrationDegrees += rate * dt / 1000.0f;
+    }
+    if (_calibrationDegrees >= CALIBRATION_TARGET_DEGREES) {
+      _finishCalibration(false);
+    } else if (now - _calibrationStartedAt >= CALIBRATION_TIMEOUT_MS) {
+      _finishCalibration(true);
+    }
+  }
+
+  /// @brief Starts a motor-driven compass calibration spin, if the required sensors and motors are ready.
+  bool _startCalibration() {
+    if (!(_compassOk && _movementOk && _motorsOk)) {
+      show_text("e2");
+      return false;
+    }
+    _compass.startCalibration();
+    _calibrationDegrees = 0;
+    _calibrationStartedAt = _calibrationLastTick = millis();
+    _alreadyAlertedAboutDistance = false;
+    _calibrating = true;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_MOVING_MS;
+    _robotMotors.move("turn_right");
+    return true;
+  }
+
+  /// @brief Stops the calibration spin, computes and reports the resulting compass correction.
+  void _finishCalibration(bool timedOut) {
+    _robotMotors.move("stop");
+    _calibrating = false;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+    bool ok;
+    if (_calibrationDegrees >= CALIBRATION_MIN_VALID_DEGREES) {
+      ok = _compass.finishCalibration();
+    } else {
+      _compass.cancelCalibration();
+      ok = false;
+    }
+
+    Monitor.println();
+    Monitor.println("--- COMPASS CALIBRATION ---");
+    Monitor.print("spin="); Monitor.print(_calibrationDegrees, 2);
+    Monitor.print(" deg  timeout="); Monitor.print(timedOut ? "yes" : "no");
+    Monitor.print("  samples_ok="); Monitor.println(ok ? "yes" : "no");
+    if (timedOut && _calibrationDegrees < 360.0f) {
+      Monitor.println("WARNING: partial arc, constants unreliable");
+    }
+    if (ok) {
+      Monitor.print("offset_x="); Monitor.print(_compass.getOffsetX(), 4);
+      Monitor.print(" offset_y="); Monitor.println(_compass.getOffsetY(), 4);
+      Monitor.print("scale_x="); Monitor.print(_compass.getScaleX(), 4);
+      Monitor.print(" scale_y="); Monitor.print(_compass.getScaleY(), 4);
+      Monitor.print("  radius="); Monitor.println(_compass.getCalibrationRadius(), 4);
+      Monitor.println("Paste into SmoothCompass.h:");
+      Monitor.print("  DEFAULT_OFFSET_X = "); Monitor.print(_compass.getOffsetX(), 4); Monitor.println("f;");
+      Monitor.print("  DEFAULT_OFFSET_Y = "); Monitor.print(_compass.getOffsetY(), 4); Monitor.println("f;");
+      Monitor.print("  DEFAULT_SCALE_X = "); Monitor.print(_compass.getScaleX(), 4); Monitor.println("f;");
+      Monitor.print("  DEFAULT_SCALE_Y = "); Monitor.print(_compass.getScaleY(), 4); Monitor.println("f;");
+    } else if (_calibrationDegrees < CALIBRATION_MIN_VALID_DEGREES) {
+      Monitor.print("insufficient rotation: "); Monitor.print(_calibrationDegrees, 1);
+      Monitor.print(" deg, need >= "); Monitor.println(CALIBRATION_MIN_VALID_DEGREES, 1);
+    } else {
+      Monitor.print("Calibration error: "); Monitor.println(_compass.getError());
+    }
+    Monitor.println("---------------------------");
+    Monitor.flush();
+
+    show_text(ok ? "cal" : "e3");
   }
 
   void _showMonitorLine(int now) {
@@ -161,6 +268,8 @@ private:
       _showMotorStatus();
 
       _showCompass();
+
+      _showCalibration();
 
       Monitor.println();
       Monitor.flush();
@@ -225,6 +334,8 @@ public:
       _movement.record();
     }
   
+    _updateCalibration(now);
+
     _monitorDistance(now);
     _showMonitorLine(now);
   
@@ -240,8 +351,22 @@ public:
   /// @brief Applies an RPC movement command and updates the report interval.
   bool moveImplementation(String command)
   {
-    _statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
+    if (_calibrating) {
+      if (command == "calibrate_compass") {
+        // Already calibrating: ignore the repeat trigger and let the in-progress spin continue.
+        return true;
+      }
+      _robotMotors.move("stop");
+      _calibrating = false;
+      _compass.cancelCalibration();
+      _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+    }
 
+    if (command == "calibrate_compass") {
+      return _startCalibration();
+    }
+
+    _statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
     return _robotMotors.move(command);
   }
 

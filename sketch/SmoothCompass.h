@@ -14,6 +14,12 @@ private:
   static const int SCL_PIN = 21;
   static const int RECOVERY_PULSES = 9;
   static const int INIT_TIMEOUT_MS = 500;
+  static constexpr float DEFAULT_OFFSET_X = 0.0f;
+  static constexpr float DEFAULT_OFFSET_Y = 0.0f;
+  static constexpr float DEFAULT_SCALE_X  = 1.0f;
+  static constexpr float DEFAULT_SCALE_Y  = 1.0f;
+  // Minimum per-axis span (raw units) for a calibration to be considered valid.
+  static constexpr float MIN_CALIBRATION_SPAN = 1.0f;
   Adafruit_LIS3MDL _lis;
   int _position = 0;
   float _mag_x[REGISTER_COUNT] = { 0 };
@@ -21,6 +27,14 @@ private:
   uint8_t _address = 0;
   bool _ok = false;
   String _error = "";
+  float _offset_x = DEFAULT_OFFSET_X;
+  float _offset_y = DEFAULT_OFFSET_Y;
+  float _scale_x  = DEFAULT_SCALE_X;
+  float _scale_y  = DEFAULT_SCALE_Y;
+  bool  _calibrating = false;
+  bool  _cal_has_sample = false;
+  float _cal_min_x, _cal_max_x, _cal_min_y, _cal_max_y;
+  float _cal_radius = 0;
 
   float _average(float* nums)
   {
@@ -41,6 +55,21 @@ private:
   {
     Wire1.beginTransmission(address);
     return Wire1.endTransmission() == 0;
+  }
+
+  void _trackCalibrationSample(float x, float y)
+  {
+    if (!_cal_has_sample)
+    {
+      _cal_min_x = _cal_max_x = x;
+      _cal_min_y = _cal_max_y = y;
+      _cal_has_sample = true;
+      return;
+    }
+    _cal_min_x = x < _cal_min_x ? x : _cal_min_x;
+    _cal_max_x = x > _cal_max_x ? x : _cal_max_x;
+    _cal_min_y = y < _cal_min_y ? y : _cal_min_y;
+    _cal_max_y = y > _cal_max_y ? y : _cal_max_y;
   }
 
 public:
@@ -131,6 +160,7 @@ public:
     if (!_ok) return;
 
     _lis.read();
+    if (_calibrating) _trackCalibrationSample(_lis.x, _lis.y);
     _mag_x[_position] = _lis.x;
     _mag_y[_position] = _lis.y;
     _position++;
@@ -139,7 +169,9 @@ public:
 
   float getDirectionAngle()
   {
-    float degrees = atan2(_average(_mag_y), _average(_mag_x)) * 180.0 / PI;
+    float mx = (_average(_mag_x) - _offset_x) * _scale_x;
+    float my = (_average(_mag_y) - _offset_y) * _scale_y;
+    float degrees = atan2(my, mx) * 180.0 / PI;
     if (degrees < 0) degrees += 360.0;
     return degrees;
   }
@@ -153,6 +185,47 @@ public:
     int index = (int)((getDirectionAngle() + 11.25) / 22.5) % 16;
     return String(BEARINGS[index]);
   }
+
+  void startCalibration()
+  {
+    _calibrating = true;
+    _cal_has_sample = false;
+  }
+
+  void cancelCalibration()
+  {
+    _calibrating = false;
+  }
+
+  bool finishCalibration()
+  {
+    _calibrating = false;
+    if (!_cal_has_sample ||
+        (_cal_max_x - _cal_min_x) < MIN_CALIBRATION_SPAN ||
+        (_cal_max_y - _cal_min_y) < MIN_CALIBRATION_SPAN)
+    {
+      _error = "cal span too small";
+      return false;
+    }
+    float ox = (_cal_max_x + _cal_min_x) / 2.0f;
+    float oy = (_cal_max_y + _cal_min_y) / 2.0f;
+    float rx = (_cal_max_x - _cal_min_x) / 2.0f;
+    float ry = (_cal_max_y - _cal_min_y) / 2.0f;
+    _cal_radius = (rx + ry) / 2.0f;
+    _offset_x = ox;
+    _offset_y = oy;
+    _scale_x = _cal_radius / rx;
+    _scale_y = _cal_radius / ry;
+    _error = "";
+    return true;
+  }
+
+  bool isCalibrating() { return _calibrating; }
+  float getOffsetX() { return _offset_x; }
+  float getOffsetY() { return _offset_y; }
+  float getScaleX() { return _scale_x; }
+  float getScaleY() { return _scale_y; }
+  float getCalibrationRadius() { return _cal_radius; }
 };
 
 #endif
