@@ -7,6 +7,7 @@
 #include "SmoothMovement.h"
 #include "LedMatrixDisplay.h"
 #include "RobotMotors.h"
+#include "CompassCalibration.h"
 
 
 // Sentinel distance used when the distance sensor has no usable reading.
@@ -15,16 +16,6 @@
 #define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
 // Status output interval while the robot is moving.
 #define STATUS_TIMESPAN_WHEN_MOVING_MS 200
-// Cumulative rotation (degrees) at which a compass calibration spin stops; overshoots 360 to absorb gyro lag/undershoot.
-#define CALIBRATION_TARGET_DEGREES 380.0f
-// Hard timeout for a calibration spin, guarding against the robot being stuck or lifted mid-spin.
-#define CALIBRATION_TIMEOUT_MS     8000
-// Gyro Z-axis rate below which rotation is treated as zero-bias noise rather than real motion, during calibration.
-#define CALIBRATION_RZ_DEADBAND_DPS 3.0f
-// Minimum accumulated rotation (degrees) for a calibration spin to be considered valid; guards against
-// accepting a spin that barely moved (e.g. stuck/lifted) just because the raw magnetic span happened to clear
-// SmoothCompass's own (much smaller) noise-floor check.
-#define CALIBRATION_MIN_VALID_DEGREES 300.0f
 // Heading tolerance for "close enough" to a point-to-bearing target, absorbing residual smoothing lag and post-calibration magnetic noise.
 #define POINT_TOLERANCE_DEGREES 8.0f
 // Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle.
@@ -50,6 +41,8 @@ private:
   RobotMotors _robotMotors;
   /// @brief Instance of the SmoothCompass class for reading robot bearings with relation to Earth.
   SmoothCompass _compass;
+  /// @brief Drives the motor-powered, gyro-closed-loop compass calibration spin.
+  CompassCalibration _calibration;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -76,16 +69,6 @@ private:
   bool _alreadyAlertedAboutDistance = false;
   /// @brief Whether the startup banner has already been printed.
   bool _alreadyShowedAppName = false;
-  /// @brief Whether a compass calibration spin is currently in progress.
-  bool  _calibrating = false;
-  /// @brief Timestamp when the current calibration spin started.
-  int   _calibrationStartedAt = 0;
-  /// @brief Timestamp of the last calibration rotation-rate integration tick.
-  int   _calibrationLastTick = 0;
-  /// @brief Cumulative rotation, in degrees, accumulated during the current calibration spin.
-  float _calibrationDegrees = 0;
-  /// @brief Whether a compass calibration has succeeded at least once since boot; point-to-bearing refuses to run until this is true.
-  bool _compassCalibratedThisBoot = false;
   /// @brief States for a point-to-bearing turn: idle, actively turning, or settling before re-checking heading.
   enum PointState { POINT_IDLE, POINT_TURNING, POINT_SETTLING };
   /// @brief Current state of any in-progress point-to-bearing turn.
@@ -211,9 +194,9 @@ private:
 
   /// @brief Prints the compass calibration spin's cumulative rotation while it is in progress.
   void _showCalibration() {
-    if (_calibrating) {
+    if (_calibration.isActive()) {
       Monitor.print(" CAL: ");
-      _printLeftJustified(_calibrationDegrees, 6);
+      _printLeftJustified(_calibration.getDegrees(), 6);
       Monitor.print("deg");
     }
   }
@@ -235,7 +218,7 @@ private:
       // Refresh the distance reading more often than the status output.
       _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
       _previousDistanceRead = now;
-      if (!_calibrating && _pointState == POINT_IDLE) {
+      if (!_calibration.isActive() && _pointState == POINT_IDLE) {
         if (_distanceCm < 10) {
           move("stop");
           if (_motorsOk) {
@@ -255,22 +238,13 @@ private:
     }
   }
 
-  /// @brief Integrates gyro rotation during a calibration spin and ends it once the target angle or timeout is reached.
+  /// @brief Feeds the current gyro rate into the calibration spin's rotation integrator and reports when it finishes.
   void _updateCalibration(int now) {
-    if (!_calibrating) return;
-    int dt = now - _calibrationLastTick;
-    _calibrationLastTick = now;
+    if (!_calibration.isActive()) return;
     float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
     _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
-    float rate = fabsf(rz);
-    // Below this rate, treat rz as gyro zero-bias noise rather than real rotation, to avoid slowly accumulating phantom degrees while stationary.
-    if (rate > CALIBRATION_RZ_DEADBAND_DPS) {
-      _calibrationDegrees += rate * dt / 1000.0f;
-    }
-    if (_calibrationDegrees >= CALIBRATION_TARGET_DEGREES) {
-      _finishCalibration(false);
-    } else if (now - _calibrationStartedAt >= CALIBRATION_TIMEOUT_MS) {
-      _finishCalibration(true);
+    if (_calibration.update(now, rz)) {
+      _reportCalibrationFinished();
     }
   }
 
@@ -283,36 +257,25 @@ private:
     Monitor.println();
     Monitor.println("--- STARTING COMPASS CALIBRATION ---");
     Monitor.println();
-    _compass.startCalibration();
-    _calibrationDegrees = 0;
-    _calibrationStartedAt = _calibrationLastTick = millis();
     _alreadyAlertedAboutDistance = false;
-    _calibrating = true;
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_MOVING_MS;
-    _robotMotors.move("turn_right");
+    _calibration.start();
     return true;
   }
 
-  /// @brief Stops the calibration spin, computes and reports the resulting compass correction.
-  void _finishCalibration(bool timedOut) {
-    _robotMotors.move("stop");
-    _calibrating = false;
+  /// @brief Reports the just-finished calibration spin's result to the Monitor and LED matrix.
+  void _reportCalibrationFinished() {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
-    bool ok;
-    if (_calibrationDegrees >= CALIBRATION_MIN_VALID_DEGREES) {
-      ok = _compass.finishCalibration();
-      if (ok) _compassCalibratedThisBoot = true;
-    } else {
-      _compass.cancelCalibration();
-      ok = false;
-    }
+    bool ok = _calibration.getLastResultOk();
+    bool timedOut = _calibration.getLastTimedOut();
+    float degrees = _calibration.getDegrees();
 
     Monitor.println();
     Monitor.println("--- FINISH COMPASS CALIBRATION ---");
-    Monitor.print("spin="); Monitor.print(_calibrationDegrees, 2);
+    Monitor.print("spin="); Monitor.print(degrees, 2);
     Monitor.print(" deg  timeout="); Monitor.print(timedOut ? "yes" : "no");
     Monitor.print("  samples_ok="); Monitor.println(ok ? "yes" : "no");
-    if (timedOut && _calibrationDegrees < 360.0f) {
+    if (timedOut && degrees < 360.0f) {
       Monitor.println("WARNING: partial arc, constants unreliable");
     }
     if (ok) {
@@ -326,9 +289,9 @@ private:
       Monitor.print("  DEFAULT_OFFSET_Y = "); Monitor.print(_compass.getOffsetY(), 4); Monitor.println("f;");
       Monitor.print("  DEFAULT_SCALE_X = "); Monitor.print(_compass.getScaleX(), 4); Monitor.println("f;");
       Monitor.print("  DEFAULT_SCALE_Y = "); Monitor.print(_compass.getScaleY(), 4); Monitor.println("f;");
-    } else if (_calibrationDegrees < CALIBRATION_MIN_VALID_DEGREES) {
-      Monitor.print("insufficient rotation: "); Monitor.print(_calibrationDegrees, 1);
-      Monitor.print(" deg, need >= "); Monitor.println(CALIBRATION_MIN_VALID_DEGREES, 1);
+    } else if (degrees < CompassCalibration::MIN_VALID_DEGREES) {
+      Monitor.print("insufficient rotation: "); Monitor.print(degrees, 1);
+      Monitor.print(" deg, need >= "); Monitor.println(CompassCalibration::MIN_VALID_DEGREES, 1);
     } else {
       Monitor.print("Calibration error: "); Monitor.println(_compass.getError());
     }
@@ -358,7 +321,7 @@ private:
       show_text("e5");
       return false;
     }
-    if (!_compassCalibratedThisBoot) {
+    if (!_calibration.hasSucceededOnce()) {
       show_text("e6");
       return false;
     }
@@ -446,9 +409,7 @@ private:
 
   /// @brief Cancels an in-progress compass calibration spin without writing a result to the display.
   void _cancelCalibration() {
-    _robotMotors.move("stop");
-    _calibrating = false;
-    _compass.cancelCalibration();
+    _calibration.cancel();
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -490,7 +451,7 @@ private:
 
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
-  SketchClass() {
+  SketchClass() : _calibration(_compass, _robotMotors) {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -568,7 +529,7 @@ public:
     bool isBearingCommand = _bearingTargetDegrees(command, &targetDegrees);
     bool alreadyStopped = false;
 
-    if (_calibrating) {
+    if (_calibration.isActive()) {
       if (command == "calibrate_compass") {
         // Already calibrating: ignore the repeat trigger and let the in-progress spin continue.
         return true;
