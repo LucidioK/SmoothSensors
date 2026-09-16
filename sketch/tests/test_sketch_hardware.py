@@ -15,6 +15,7 @@ on the status lines each side prints once a second:
       - SmoothDistance -> " DST: <n>cm" (or "Distance NOK" if unwired)
       - SmoothMovement -> " ax=<n> ay=<n> ..." (or "Movement NOK" if unwired)
       - RobotMotors    -> " MOT: <status>"
+      - MotorCalibration -> " MCL: drift=<n> pwr=<n>" (only while a motor calibration run is active)
   - `arduino-app-cli app logs <remote_dir> --follow` -- the Python app's own
     stdout (confirmed via `arduino-app-cli app logs --help`: "Show the logs of
     the Python app" -- it does NOT carry the MCU's Monitor output, the two are
@@ -57,168 +58,247 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 APP_NAME = "smoothsensors03"
 REMOTE_DIR = f"ArduinoApps/{APP_NAME}"
 
-# Populated by main() from CLI args before unittest.main() runs, then consumed
-# by setUpModule().
-BOARD_HOST_ARG: str | None = None
-CAPTURE_SECONDS = 25
-SKIP_DEPLOY = False
 
-# Populated by setUpModule(); read by every test method.
-CAPTURED_MCU_MONITOR = ""
-CAPTURED_APP_LOGS = ""
-RESOLVED_BOARD_HOST = ""
-
-
-def resolve_board_host(explicit: str | None) -> str:
-    """Mirrors the BOARD_HOST/BOARD_IP defaulting logic in scripts/deploy.sh and deploy.ps1."""
-    if explicit:
-        return explicit
-    if os.environ.get("BOARD_HOST"):
-        return os.environ["BOARD_HOST"]
-    board_ip = os.environ.get("BOARD_IP", "10.0.0.195")
-    return f"arduino@{board_ip}"
-
-
-def run_deploy(board_host_arg: str | None) -> None:
-    """Runs the platform-appropriate deploy script, exactly as a developer would by hand."""
-    if platform.system() == "Windows":
-        cmd = ["powershell", "-NoProfile", "-File", str(REPO_ROOT / "scripts" / "deploy.ps1")]
-    else:
-        cmd = ["bash", str(REPO_ROOT / "scripts" / "deploy.sh")]
-    if board_host_arg:
-        cmd.append(board_host_arg)
-
-    print(f"==> Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, cwd=REPO_ROOT, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(f"deploy script exited with status {result.returncode}")
-
-
-def _start_ssh_stream(board_host: str, remote_cmd: list[str]) -> subprocess.Popen:
-    return subprocess.Popen(
-        ["ssh", board_host, *remote_cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-
-def _stop_and_collect(proc: subprocess.Popen) -> str:
-    proc.kill()
-    out, _ = proc.communicate()
-    return out or ""
-
-
-def capture_stream(board_host: str, remote_cmd: list[str], seconds: int) -> str:
-    """Runs one SSH command for a fixed, client-side-timed window and returns its output."""
-    proc = _start_ssh_stream(board_host, remote_cmd)
-    time.sleep(seconds)
-    return _stop_and_collect(proc)
-
-
-def capture_mcu_and_app_streams(board_host: str, remote_dir: str, seconds: int) -> tuple[str, str]:
+class HardwareTestSession:
     """
-    Captures `arduino-app-cli monitor` (MCU Serial output) then `arduino-app-cli
-    app logs <remote_dir> --follow` (Python app stdout), one after the other --
-    NOT concurrently: if the board is only set up for password SSH auth (see
-    README.md's "key-based access" note), two simultaneous ssh processes both
-    prompting for a password race for the same terminal stdin and one of them
-    loses ("Permission denied, please try again."). Sequential capture avoids
-    that regardless of which auth method is configured, at the cost of roughly
-    doubling this function's wall-clock time.
+    Encapsulates a single hardware test session, including the board host,
+    capture duration, and whether to skip the deploy step. Provides methods to
+    run the deploy script, capture logs from the board, and store the captured
+    output for later assertions.
     """
-    mcu_output = capture_stream(board_host, ["arduino-app-cli", "monitor"], seconds)
-    app_output = capture_stream(board_host, ["arduino-app-cli", "app", "logs", remote_dir, "--follow"], seconds)
-    return mcu_output, app_output
+    def __init__(
+        self,
+        board_host_arg: str | None,
+        capture_seconds: int,
+        skip_deploy: bool,
+    ):
+        """
+        Initialize a HardwareTestSession with the given parameters.
+        Args:
+            board_host_arg (str | None): The board host argument, e.g., "arduino@10.0.0.195"
+            capture_seconds (int): The duration in seconds to capture logs for
+            skip_deploy (bool): Whether to skip the deploy step
+        """
+        self.board_host_arg = board_host_arg
+        self.capture_seconds = capture_seconds
+        self.skip_deploy = skip_deploy
+        self.board_host = self.resolve_board_host(board_host_arg)
+        self.mcu_monitor = ""
+        self.app_logs = ""
 
+    @staticmethod
+    def resolve_board_host(explicit: str | None) -> str:
+        """Mirrors the BOARD_HOST/BOARD_IP defaulting logic."""
+        if explicit:
+            return explicit
+        if os.environ.get("BOARD_HOST"):
+            return os.environ["BOARD_HOST"]
+        return f"arduino@{os.environ.get('BOARD_IP', '10.0.0.195')}"
 
-def setUpModule():
-    global CAPTURED_MCU_MONITOR, CAPTURED_APP_LOGS, RESOLVED_BOARD_HOST
+    def run_deploy(self) -> None:
+        """Runs the platform-appropriate deploy script."""
+        if platform.system() == "Windows":
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-File",
+                str(REPO_ROOT / "scripts" / "deploy.ps1"),
+            ]
+        else:
+            cmd = ["bash", str(REPO_ROOT / "scripts" / "deploy.sh")]
 
-    RESOLVED_BOARD_HOST = resolve_board_host(BOARD_HOST_ARG)
+        if self.board_host_arg:
+            cmd.append(self.board_host_arg)
 
-    if SKIP_DEPLOY:
-        print("==> --skip-deploy set, testing against whatever is currently deployed")
-    else:
-        run_deploy(BOARD_HOST_ARG)
-        print("==> Deploy finished, giving the app a moment to finish booting")
-        time.sleep(3)
+        print(f"==> Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, cwd=REPO_ROOT, timeout=600, check=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"deploy script exited with status {result.returncode}"
+            )
 
-    print(
-        f"==> Capturing {CAPTURE_SECONDS}s of `arduino-app-cli monitor` and "
-        f"`arduino-app-cli app logs` from {RESOLVED_BOARD_HOST}"
-    )
-    CAPTURED_MCU_MONITOR, CAPTURED_APP_LOGS = capture_mcu_and_app_streams(
-        RESOLVED_BOARD_HOST, REMOTE_DIR, CAPTURE_SECONDS
-    )
-
-    if not CAPTURED_MCU_MONITOR.strip():
-        raise RuntimeError(
-            f"No output captured over `ssh {RESOLVED_BOARD_HOST} arduino-app-cli monitor`. "
-            "Is the board reachable, and is the sketch actually running?"
+    @staticmethod
+    def _start_ssh_stream(
+        board_host: str,
+        remote_cmd: list[str],
+    ) -> subprocess.Popen:
+        return subprocess.Popen(
+            ["ssh", board_host, *remote_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
-    if not CAPTURED_APP_LOGS.strip():
-        raise RuntimeError(
-            "No log output captured over "
-            f"`ssh {RESOLVED_BOARD_HOST} arduino-app-cli app logs {REMOTE_DIR} --follow`. "
-            "Is the board reachable, and is the app actually running?"
+
+    @staticmethod
+    def _stop_and_collect(proc: subprocess.Popen) -> str:
+        proc.kill()
+        out, _ = proc.communicate()
+        return out or ""
+
+    @classmethod
+    def _capture_stream(
+        cls,
+        board_host: str,
+        remote_cmd: list[str],
+        seconds: int,
+    ) -> str:
+        proc = cls._start_ssh_stream(board_host, remote_cmd)
+        time.sleep(seconds)
+        return cls._stop_and_collect(proc)
+
+    def capture(self) -> None:
+        """
+        Capture the MCU monitor and Python app logs from the board.
+        This method will either deploy the sketch and app to the board (if skip_deploy is False)
+        or use whatever is currently deployed (if skip_deploy is True).
+        It uses SSH to run `arduino-app-cli monitor` and `arduino-app-cli app logs` on the board,
+        capturing the output for the specified duration (capture_seconds).
+        """
+        if self.skip_deploy:
+            print("==> --skip-deploy set, testing against whatever is currently deployed")
+        else:
+            self.run_deploy()
+            print("==> Deploy finished, giving the app a moment to finish booting")
+            time.sleep(3)
+
+        print(
+            f"==> Capturing {self.capture_seconds}s of "
+            f"`arduino-app-cli monitor` and `arduino-app-cli app logs` "
+            f"from {self.board_host}"
         )
+
+        self.mcu_monitor = self._capture_stream(
+            self.board_host,
+            ["arduino-app-cli", "monitor"],
+            self.capture_seconds,
+        )
+        self.app_logs = self._capture_stream(
+            self.board_host,
+            [
+                "arduino-app-cli",
+                "app",
+                "logs",
+                REMOTE_DIR,
+                "--follow",
+            ],
+            self.capture_seconds,
+        )
+
+        print("\n\n=== Captured `arduino-app-cli monitor` (MCU Serial output) ===")
+        print(self.mcu_monitor)
+        print("\n\n=== Captured `arduino-app-cli app logs` (Python app stdout) ===")
+        print(self.app_logs)
+
+        if not self.mcu_monitor.strip():
+            raise RuntimeError(
+                f"No output captured over "
+                f"`ssh {self.board_host} arduino-app-cli monitor`."
+            )
+
+        if not self.app_logs.strip():
+            raise RuntimeError(
+                "No log output captured over "
+                f"`ssh {self.board_host} arduino-app-cli app logs "
+                f"{REMOTE_DIR} --follow`."
+            )
 
 
 class SketchHardwareTests(unittest.TestCase):
-    """Each test inspects one of the two captured streams from setUpModule
-    (CAPTURED_MCU_MONITOR or CAPTURED_APP_LOGS) for evidence that a specific
-    class initialized and is running on real hardware. Order doesn't matter --
-    there's no per-test state.
-
-    There's no test for sketch.ino's "SmoothSensors003..." boot banner: it's
-    printed exactly once, on the sketch's first loop() iteration after boot
-    (see `_alreadyShowedAppName` in sketch.ino), and `arduino-app-cli monitor`
-    is a live tail with no history buffer -- by the time this script deploys,
-    waits, and attaches, that one-time line has already scrolled past. The
-    status-line tests below are the reliable signal instead: none of them can
-    print without setup() having already completed successfully.
     """
+    TestCase for hardware-in-the-loop testing of the sketch and Python app.
+    """
+    session: HardwareTestSession
+
+    @classmethod
+    def configure(
+        cls,
+        board_host_arg: str | None,
+        capture_seconds: int,
+        skip_deploy: bool,
+    ) -> None:
+        """
+        Configure the hardware test session.
+        
+        This must be called before setUpClass() is invoked, which is normally
+        done by unittest.main() after the test class is defined. It sets up the
+        HardwareTestSession with the provided parameters, which will be used to
+        capture the MCU monitor and Python app logs during the tests.
+        
+        Args:
+            board_host_arg (str | None): The board host argument, e.g., 
+                "arduino@10.0.0.195".
+                If None, it will be resolved from environment variables.
+            capture_seconds (int): The number of seconds to capture logs from
+                the board.
+            skip_deploy (bool): If True, the deploy step will be skipped, and
+                the tests will run against whatever is currently deployed on the
+                board. If False, the sketch will be deployed before capturing logs.
+        
+        """
+        cls.session = HardwareTestSession(
+            board_host_arg,
+            capture_seconds,
+            skip_deploy,
+        )
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        """
+        Set up the test class by capturing logs from the hardware.
+        """
+        cls.session.capture()
 
     def test_python_app_boots(self):
+        """
+        Test that the Python app's startup banner appears in the logs, indicating
+        that the app has booted successfully.
+        """
         self.assertIn(
-            "smoothsensors03", CAPTURED_APP_LOGS,
-            "python/main.py's startup banner never appeared -- Python app may not have started",
+            "smoothsensors03",
+            self.session.app_logs,
+            "python/main.py's startup banner never appeared",
         )
 
     def test_distance_sensor_status_reported(self):
-        self.assertRegex(
-            CAPTURED_MCU_MONITOR, r"DST:\s*-?\d+cm|Distance NOK",
-            "no SmoothDistance status line -- distance.record()/getDistanceCm() may be failing",
-        )
+        """
+        Test that the distance sensor reports its status in the MCU monitor output.
+        This checks for either a valid distance reading (e.g., "DST: 123cm") or an
+        error message ("Distance NOK") if the sensor is not wired correctly.
+        """
+        self.assertRegex(self.session.mcu_monitor, r"DST:\s*-?\d+cm|Distance NOK")
 
     def test_movement_sensor_status_reported(self):
-        self.assertRegex(
-            CAPTURED_MCU_MONITOR, r"ax=-?\d+(\.\d+)?|Movement NOK",
-            "no SmoothMovement status line -- movement.record()/get() may be failing",
-        )
+        """
+        Test that the movement sensor reports its status in the MCU monitor output.
+        This checks for either valid acceleration readings (e.g., "ax=123 ay=456") or an
+        error message ("Movement NOK") if the sensor is not wired correctly.
+        """
+        self.assertRegex(self.session.mcu_monitor, r"ax=\s*-?\d+(\.\d+)?|Movement NOK")
 
     def test_motor_status_reported(self):
-        self.assertIn(
-            "MOT:", CAPTURED_MCU_MONITOR,
-            "no RobotMotors status line -- robotMotors.getStatus() may be failing",
-        )
+        """
+        Test that the motor reports its status in the MCU monitor output.
+        """
+        self.assertIn("MOT:", self.session.mcu_monitor)
 
     def test_compass_status_reported(self):
-        self.assertIn(
-            "CMP:", CAPTURED_MCU_MONITOR,
-            "no Compass status line -- compass.getStatus() may be failing",
-        )
+        """
+        Test that the compass reports its status in the MCU monitor output.
+        """
+        self.assertIn("CMP:", self.session.mcu_monitor)
 
     def test_python_loop_heartbeat_reported(self):
-        self.assertRegex(
-            CAPTURED_APP_LOGS, r"\bPY\b",
-            f"no 'PY' heartbeat seen in {CAPTURE_SECONDS}s -- python/main.py's loop() may have "
-            "stalled or CAPTURE_SECONDS is too short (it prints every >10s)",
-        )
+        """
+        Test that the Python app reports a heartbeat in the logs.
+        """
+        self.assertRegex(self.session.app_logs, r"\bPY\b")
 
 
 def main() -> int:
+    """
+    Main entry point for the hardware test script.
+    Returns 0 on success, non-zero on failure.
+    """
     parser = argparse.ArgumentParser(
         description="Deploy the sketch to a real Uno Q and check it's running correctly.",
     )
@@ -251,21 +331,21 @@ def main() -> int:
             else "DEPLOY (compile + upload the sketch, restart the app) to"
         )
         print(dedent(f"""\
-            This would {action} a real Uno Q board at {resolve_board_host(args.board_host)!r},
-            then tail its MCU monitor and app logs for {args.capture_seconds}s over SSH and
-            assert on them.
+            This would {action} a real Uno Q board at
+            {HardwareTestSession.resolve_board_host(args.board_host)!r},
+            then tail its MCU monitor and app logs for
+            {args.capture_seconds}s over SSH and assert on them.
 
-            Nothing was done. Re-run with --yes to actually do this, e.g.:
-                python {Path(__file__).name} --yes
+            Nothing was done. Re-run with --yes to actually do this.
         """))
         return 0
 
-    global BOARD_HOST_ARG, CAPTURE_SECONDS, SKIP_DEPLOY
-    BOARD_HOST_ARG = args.board_host
-    CAPTURE_SECONDS = args.capture_seconds
-    SKIP_DEPLOY = args.skip_deploy
+    SketchHardwareTests.configure(
+        board_host_arg=args.board_host,
+        capture_seconds=args.capture_seconds,
+        skip_deploy=args.skip_deploy,
+    )
 
-    # Hand the rest of argv to unittest (e.g. -v, or a specific test name).
     sys.argv = [sys.argv[0]] + remaining
     unittest.main()
     return 0

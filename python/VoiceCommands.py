@@ -7,7 +7,24 @@ The recognized commands are:
     "turn right"
     "turn left"
     "stop"
-    "calibrate"
+    "calibrate compass"
+    "calibrate motors"
+    "point to north"
+    "point to northeast"
+    "point to east"
+    "point to southeast"
+    "point to south"
+    "point to southwest"
+    "point to west"
+    "point to northwest"
+    "point north"
+    "point northeast"
+    "point east"
+    "point southeast"
+    "point south"
+    "point southwest"
+    "point west"
+    "point northwest"
 The recognized commands are prefixed with the wake word "robot".
 The recognized commands are also printed to the console.
 """
@@ -31,7 +48,24 @@ COMMANDS = {
     "turn right": "turn_right",
     "turn left":  "turn_left",
     "stop":       "stop",
-    "calibrate":  "calibrate_compass",
+    "calibrate compass":  "calibrate_compass",
+    "calibrate motors":   "calibrate_motors",
+    "point to north":     "point_north",
+    "point to northeast": "point_northeast",
+    "point to east":      "point_east",
+    "point to southeast": "point_southeast",
+    "point to south":     "point_south",
+    "point to southwest": "point_southwest",
+    "point to west":      "point_west",
+    "point to northwest": "point_northwest",
+    "point north":        "point_north",
+    "point northeast":    "point_northeast",
+    "point east":         "point_east",
+    "point southeast":    "point_southeast",
+    "point south":        "point_south",
+    "point southwest":    "point_southwest",
+    "point west":         "point_west",
+    "point northwest":    "point_northwest",
 }
 
 GRAMMAR = json.dumps([f"{WAKE_WORD} {phrase}" for phrase in COMMANDS] + ["[unk]"])
