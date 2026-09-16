@@ -9,6 +9,7 @@
 #include "RobotMotors.h"
 #include "CompassCalibration.h"
 #include "MotorCalibration.h"
+#include "CombinedCalibration.h"
 #include "MonitorFormat.h"
 
 
@@ -44,6 +45,8 @@ private:
   CompassCalibration _calibration;
   /// @brief Drives the motor-powered, gyro-closed-loop motor calibration (straight-line bias + turn power).
   MotorCalibration _motorCalibration;
+  /// @brief Runs the motor calibration followed by the compass calibration as one "calibrate" command.
+  CombinedCalibration _combinedCalibration;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -198,7 +201,7 @@ private:
 
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
-  SketchClass() : _robotMotors(_compass, _movement, _ledMatrix), _calibration(_compass, _movement, _robotMotors, _ledMatrix), _motorCalibration(_robotMotors, _movement, _ledMatrix) {
+  SketchClass() : _robotMotors(_compass, _movement, _ledMatrix), _calibration(_compass, _movement, _robotMotors, _ledMatrix), _motorCalibration(_robotMotors, _movement, _ledMatrix), _combinedCalibration(_motorCalibration, _calibration) {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -254,10 +257,7 @@ public:
       _movement.record();
     }
   
-    if (_calibration.update(now)) {
-      _onFeatureStopped();
-    }
-    if (_motorCalibration.update(now)) {
+    if (_combinedCalibration.update(now)) {
       _onFeatureStopped();
     }
     if (_robotMotors.updatePointing(now)) {
@@ -281,21 +281,12 @@ public:
   {
     bool alreadyStopped = false;
 
-    if (_calibration.isActive()) {
-      if (command == "calibrate_compass") {
-        // Already calibrating: ignore the repeat trigger and let the in-progress spin continue.
+    if (_combinedCalibration.isActive()) {
+      if (command == "calibrate") {
+        // Already calibrating: ignore the repeat trigger and let the in-progress sequence continue.
         return true;
       }
-      _calibration.cancel();
-      _onFeatureStopped();
-      alreadyStopped = true;
-    }
-
-    if (_motorCalibration.isActive()) {
-      if (command == "calibrate_motors") {
-        return true;
-      }
-      _motorCalibration.cancel();
+      _combinedCalibration.cancel();
       _onFeatureStopped();
       alreadyStopped = true;
     }
@@ -307,14 +298,8 @@ public:
       alreadyStopped = true;
     }
 
-    if (command == "calibrate_compass") {
-      bool ok = _calibration.start();
-      if (ok) _onFeatureStarted();
-      return ok;
-    }
-
-    if (command == "calibrate_motors") {
-      bool ok = _motorCalibration.start();
+    if (command == "calibrate") {
+      bool ok = _combinedCalibration.start();
       if (ok) _onFeatureStarted();
       return ok;
     }

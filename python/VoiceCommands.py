@@ -7,8 +7,7 @@ The recognized commands are:
     "turn right"
     "turn left"
     "stop"
-    "calibrate compass"
-    "calibrate motors"
+    "calibrate"
     "point to north"
     "point to northeast"
     "point to east"
@@ -48,8 +47,7 @@ COMMANDS = {
     "turn right": "turn_right",
     "turn left":  "turn_left",
     "stop":       "stop",
-    "calibrate compass":  "calibrate_compass",
-    "calibrate motors":   "calibrate_motors",
+    "calibrate":          "calibrate",
     "point to north":     "point_north",
     "point to northeast": "point_northeast",
     "point to east":      "point_east",
