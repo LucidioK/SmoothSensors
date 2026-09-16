@@ -30,6 +30,7 @@ class MainClass:
             "turn_left":  "tl",
             "stop":       "st",
             "calibrate_compass": "cal",
+            "calibrate_motors": "cm",
             "point_north": "pN",
             "point_northeast": "pNE",
             "point_east": "pE",

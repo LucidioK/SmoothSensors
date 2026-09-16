@@ -14,8 +14,9 @@ class CompassCalibration
 private:
   // Cumulative rotation (degrees) at which the spin stops; overshoots 360 to absorb gyro lag/undershoot.
   static constexpr float TARGET_DEGREES = 380.0f;
-  // Hard timeout, guarding against the robot being stuck or lifted mid-spin.
-  static constexpr int TIMEOUT_MS = 8000;
+  // Hard timeout, guarding against the robot being stuck or lifted mid-spin. Turns now run at the
+  // calibrated (potentially slower) turn power via RobotMotors, so the spin needs more time to complete.
+  static constexpr int TIMEOUT_MS = 20000;
   // Gyro Z-axis rate below which rotation is treated as zero-bias noise rather than real motion.
   static constexpr float RZ_DEADBAND_DPS = 3.0f;
 

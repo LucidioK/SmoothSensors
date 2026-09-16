@@ -7,7 +7,8 @@ The recognized commands are:
     "turn right"
     "turn left"
     "stop"
-    "calibrate"
+    "calibrate compass"
+    "calibrate motors"
     "point to north"
     "point to northeast"
     "point to east"
@@ -16,6 +17,14 @@ The recognized commands are:
     "point to southwest"
     "point to west"
     "point to northwest"
+    "point north"
+    "point northeast"
+    "point east"
+    "point southeast"
+    "point south"
+    "point southwest"
+    "point west"
+    "point northwest"
 The recognized commands are prefixed with the wake word "robot".
 The recognized commands are also printed to the console.
 """
@@ -40,6 +49,7 @@ COMMANDS = {
     "turn left":  "turn_left",
     "stop":       "stop",
     "calibrate compass":  "calibrate_compass",
+    "calibrate motors":   "calibrate_motors",
     "point to north":     "point_north",
     "point to northeast": "point_northeast",
     "point to east":      "point_east",

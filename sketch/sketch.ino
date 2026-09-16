@@ -8,18 +8,23 @@
 #include "LedMatrixDisplay.h"
 #include "RobotMotors.h"
 #include "CompassCalibration.h"
+#include "MotorCalibration.h"
 
 
 // Sentinel distance used when the distance sensor has no usable reading.
 #define INFINITE_DISTANCE 1000000
 // Status output interval while the robot is stationary.
 #define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
-// Status output interval while the robot is moving.
-#define STATUS_TIMESPAN_WHEN_MOVING_MS 200
+// Status output interval while the robot is moving. Also gates _monitorDistance's distance-sensor refresh
+// cadence (_statusTimeSpan/10) -- at 200ms this made sensor polling too coarse for MotorCalibration's
+// turn-ramp phase to see a fresh gyro reading within its 600ms detection window, causing spurious e8
+// failures on real hardware; 50ms fixed it (confirmed on-device).
+#define STATUS_TIMESPAN_WHEN_MOVING_MS 50
 // Heading tolerance for "close enough" to a point-to-bearing target, absorbing residual smoothing lag and post-calibration magnetic noise.
 #define POINT_TOLERANCE_DEGREES 8.0f
-// Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle.
-#define POINT_TIMEOUT_MS 8000
+// Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle. Turns now run
+// at the calibrated, potentially slower, turn power.
+#define POINT_TIMEOUT_MS 20000
 // Minimum dwell time after stopping before trusting a heading reading, giving the ring buffer time to refill with post-stop samples.
 #define POINT_SETTLE_MS 500
 
@@ -43,6 +48,8 @@ private:
   SmoothCompass _compass;
   /// @brief Drives the motor-powered, gyro-closed-loop compass calibration spin.
   CompassCalibration _calibration;
+  /// @brief Drives the motor-powered, gyro-closed-loop motor calibration (straight-line bias + turn power).
+  MotorCalibration _motorCalibration;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -85,6 +92,8 @@ private:
   unsigned int _pointSettleSamples = 0;
   /// @brief Signed heading error (degrees) from the previous iteration, used to detect a sign flip (overshoot) between loop iterations.
   float _pointLastError = 0;
+  /// @brief Most recently observed motor calibration phase, used to detect phase transitions for LED updates.
+  MotorCalibration::Phase _lastMotorPhase = MotorCalibration::IDLE;
   ///
 
   template <typename T> int _intJust(T num, int size) {
@@ -201,6 +210,15 @@ private:
     }
   }
 
+  /// @brief Prints the motor calibration run's drift/ramp power while it is in progress.
+  void _showMotorCalibration() {
+    if (_motorCalibration.isActive()) {
+      Monitor.print(" MCL: drift=");
+      _printLeftJustified(_motorCalibration.getDriftDegrees(), 6);
+      Monitor.print(" pwr="); _printLeftJustified((int)_motorCalibration.getRampPower(), 3);
+    }
+  }
+
   /// @brief Prints the point-to-bearing turn's target/current heading while one is in progress.
   void _showPointing() {
     if (_pointState != POINT_IDLE) {
@@ -245,6 +263,24 @@ private:
     _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
     if (_calibration.update(now, rz)) {
       _reportCalibrationFinished();
+    }
+  }
+
+  /// @brief Feeds the current gyro rate into the motor calibration state machine, drives its phase-transition
+  /// LED updates, and reports when it finishes.
+  void _updateMotorCalibration(int now) {
+    if (!_motorCalibration.isActive() && _lastMotorPhase == MotorCalibration::IDLE) return;
+    MotorCalibration::Phase phase = _motorCalibration.getPhase();
+    if (phase != _lastMotorPhase) {
+      if (phase == MotorCalibration::BASELINE) show_text("cms");
+      else if (phase == MotorCalibration::TURN_RAMP) show_text("cmt");
+      _lastMotorPhase = phase;
+    }
+    float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
+    _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
+    if (_motorCalibration.update(now, rz)) {
+      _lastMotorPhase = MotorCalibration::IDLE;
+      _reportMotorCalibrationFinished();
     }
   }
 
@@ -299,6 +335,39 @@ private:
     Monitor.flush();
 
     show_text(ok ? "cal" : "e3");
+  }
+
+  /// @brief Starts a motor-driven motor calibration run, if the required sensors and motors are ready.
+  bool _startMotorCalibration() {
+    if (!(_movementOk && _motorsOk)) {
+      show_text("e7");
+      return false;
+    }
+    Monitor.println();
+    Monitor.println("--- STARTING MOTOR CALIBRATION ---");
+    Monitor.println();
+    _alreadyAlertedAboutDistance = false;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_MOVING_MS;
+    _motorCalibration.start();
+    return true;
+  }
+
+  /// @brief Reports the just-finished motor calibration run's result to the Monitor and LED matrix.
+  void _reportMotorCalibrationFinished() {
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+    bool ok = _motorCalibration.getLastResultOk();
+    bool timedOut = _motorCalibration.getLastTimedOut();
+    Monitor.println();
+    Monitor.println("--- FINISH MOTOR CALIBRATION ---");
+    Monitor.print("drift="); Monitor.print(_motorCalibration.getDriftDegrees(), 2);
+    Monitor.print("deg  ramp_power="); Monitor.print(_motorCalibration.getRampPower());
+    Monitor.print("  timeout="); Monitor.print(timedOut ? "yes" : "no");
+    Monitor.print("  ok="); Monitor.println(ok ? "yes" : "no");
+    Monitor.print("straight_bias="); Monitor.print(_robotMotors.getStraightBias());
+    Monitor.print("  turn_speed="); Monitor.println(_robotMotors.getTurnSpeed());
+    Monitor.println("---------------------------");
+    Monitor.flush();
+    show_text(ok ? "rdy" : "e8");
   }
 
   /// @brief Signed angular error (degrees) from the current calibrated heading to a target, normalized to (-180, 180].
@@ -407,6 +476,13 @@ private:
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
+  /// @brief Cancels an in-progress motor calibration run without writing a result to the display.
+  void _cancelMotorCalibration() {
+    _motorCalibration.cancel();
+    _lastMotorPhase = MotorCalibration::IDLE;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+  }
+
   /// @brief Cancels an in-progress compass calibration spin without writing a result to the display.
   void _cancelCalibration() {
     _calibration.cancel();
@@ -442,6 +518,8 @@ private:
 
       _showCalibration();
 
+      _showMotorCalibration();
+
       _showPointing();
 
       Monitor.println();
@@ -451,7 +529,7 @@ private:
 
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
-  SketchClass() : _calibration(_compass, _robotMotors) {
+  SketchClass() : _calibration(_compass, _robotMotors), _motorCalibration(_robotMotors) {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -508,6 +586,7 @@ public:
     }
   
     _updateCalibration(now);
+    _updateMotorCalibration(now);
     _updatePointing(now);
 
     _monitorDistance(now);
@@ -538,6 +617,14 @@ public:
       alreadyStopped = true;
     }
 
+    if (_motorCalibration.isActive()) {
+      if (command == "calibrate_motors") {
+        return true;
+      }
+      _cancelMotorCalibration();
+      alreadyStopped = true;
+    }
+
     if (_pointState != POINT_IDLE) {
       if (isBearingCommand && command == _pointCommand) {
         // Already turning toward this exact bearing: ignore the repeat trigger and let it continue.
@@ -549,6 +636,10 @@ public:
 
     if (command == "calibrate_compass") {
       return _startCalibration();
+    }
+
+    if (command == "calibrate_motors") {
+      return _startMotorCalibration();
     }
 
     if (isBearingCommand) {
