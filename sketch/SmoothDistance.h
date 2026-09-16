@@ -3,8 +3,9 @@
 #define _SMOOTHDISTANCE_H_
 #include <Arduino.h>
 #include "Modulino.h"
+#include "ISmoothDistance.h"
 
-class SmoothDistance
+class SmoothDistance : public ISmoothDistance
 {
 private:
   static const int REGISTER_COUNT = 16;
@@ -35,14 +36,14 @@ public:
   {
   }
 
-  bool initialize()
+  bool initialize() override
   {
     Modulino.begin();
     _distance.begin();
     return true;
   }
 
-  void record()
+  void record() override
   {
     uint8_t new_data_ready = 0,
             status = 0;
@@ -59,7 +60,7 @@ public:
     }
   }
 
-  int getDistanceCm() 
+  int getDistanceCm() override
   {
     int
       sum = 0,

@@ -1,8 +1,9 @@
 #ifndef _SMOOTH_MOVEMENT_
 #define _SMOOTH_MOVEMENT_ 1
 #include <Arduino_Modulino.h>
+#include "ISmoothMovement.h"
 
-class SmoothMovement
+class SmoothMovement : public ISmoothMovement
 {
 private:
   static const unsigned int REGISTER_COUNT = 16;
@@ -16,6 +17,7 @@ private:
   float _rot_z[REGISTER_COUNT] = { 0 };
 
   bool _already_warned_data_not_ready = false;
+  bool _ok = false;
 
   float _average(float* nums)
   {
@@ -38,13 +40,16 @@ public:
   {
   }
 
-  bool initialize()
+  bool initialize() override
   {
     Modulino.begin();
-    return _movement.begin();
+    _ok = _movement.begin();
+    return _ok;
   }
 
-  void record()
+  bool isOk() override { return _ok; }
+
+  void record() override
   {
     _movement.update();
 
@@ -62,7 +67,7 @@ public:
   }
 
   
-  void get(float* ax, float* ay, float* az, float* rx, float* ry, float* rz)
+  void get(float* ax, float* ay, float* az, float* rx, float* ry, float* rz) override
   {
     *ax = _average(_acc_x);
     *ay = _average(_acc_y);

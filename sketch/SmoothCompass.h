@@ -3,8 +3,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_LIS3MDL.h>
+#include "ISmoothCompass.h"
 
-class SmoothCompass
+class SmoothCompass : public ISmoothCompass
 {
 private:
   static const unsigned int REGISTER_COUNT = 32;
@@ -112,7 +113,7 @@ public:
     return freed;
   }
 
-  bool initialize()
+  bool initialize() override
   {
     _ok = false;
     _error = "";
@@ -150,12 +151,14 @@ public:
     return true;
   }
 
-  String getError()
+  String getError() override
   {
     return _error;
   }
 
-  void record()
+  bool isOk() override { return _ok; }
+
+  void record() override
   {
     if (!_ok) return;
 
@@ -167,7 +170,7 @@ public:
     _position %= REGISTER_COUNT;
   }
 
-  float getDirectionAngle()
+  float getDirectionAngle() override
   {
     float mx = (_average(_mag_x) - _offset_x) * _scale_x;
     float my = (_average(_mag_y) - _offset_y) * _scale_y;
@@ -176,7 +179,7 @@ public:
     return degrees;
   }
 
-  String getDirectionBearing()
+  String getDirectionBearing() override
   {
     static const char* const BEARINGS[16] = {
       "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -186,18 +189,18 @@ public:
     return String(BEARINGS[index]);
   }
 
-  void startCalibration()
+  void startCalibration() override
   {
     _calibrating = true;
     _cal_has_sample = false;
   }
 
-  void cancelCalibration()
+  void cancelCalibration() override
   {
     _calibrating = false;
   }
 
-  bool finishCalibration()
+  bool finishCalibration() override
   {
     _calibrating = false;
     if (!_cal_has_sample ||
@@ -221,12 +224,12 @@ public:
   }
 
   bool isCalibrating() { return _calibrating; }
-  float getOffsetX() { return _offset_x; }
-  float getOffsetY() { return _offset_y; }
-  float getScaleX() { return _scale_x; }
-  float getScaleY() { return _scale_y; }
-  float getCalibrationRadius() { return _cal_radius; }
-  static unsigned int getSampleCount() { return REGISTER_COUNT; }
+  float getOffsetX() override { return _offset_x; }
+  float getOffsetY() override { return _offset_y; }
+  float getScaleX() override { return _scale_x; }
+  float getScaleY() override { return _scale_y; }
+  float getCalibrationRadius() override { return _cal_radius; }
+  unsigned int getSampleCount() override { return REGISTER_COUNT; }
 };
 
 #endif
