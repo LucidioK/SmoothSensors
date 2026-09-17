@@ -10,32 +10,42 @@
 
 /// @brief Drives a motor-powered, gyro-closed-loop motor calibration: first a straight-line run that
 /// integrates the IMU's rz to measure how much the robot veers (correcting it via RobotMotors' per-wheel
-/// straight bias), then a turn-power ramp that finds the lowest turn power that reliably sustains rotation
-/// (stored back into RobotMotors' turn speed), then a rate-measure phase and a coast-measure phase that
-/// capture the steady-state turn rate and momentum coast angle at that finalized speed. Owns its full
-/// lifecycle: start/update/report/cancel, Monitor output, and LED matrix display.
+/// straight bias), then a fixed-speed right turn and a fixed-speed left turn, each held for at least
+/// TURN_MIN_DURATION_MS, recording per-direction peak yaw rate, time-to-peak, and time-to-full-stop into
+/// RobotMotors -- consumed there to compute precise open-loop timed turns. Owns its full lifecycle:
+/// start/update/report/cancel, Monitor output, and LED matrix display.
 class MotorCalibration : public IMotorCalibration
 {
 public:
-  enum Phase { IDLE, BASELINE, STRAIGHT, SETTLE, TURN_RAMP, RATE_MEASURE, COAST_MEASURE };
+  enum Phase { IDLE, BASELINE, STRAIGHT, SETTLE,
+               TURN_RIGHT_MEASURE, STOP_RIGHT_MEASURE,
+               TURN_LEFT_MEASURE,  STOP_LEFT_MEASURE };
 
 private:
   static constexpr int BASELINE_MS = 500;
   static constexpr int STRAIGHT_MS = 5000;
   static constexpr int SETTLE_MS = 800;
-  static constexpr int RAMP_STEP_MS = 600;
-  static constexpr int TIMEOUT_MS = 26000; // covers the two new phases -- BASELINE(500)+STRAIGHT(5000)+SETTLE(800+)+TURN_RAMP(worst case ~7200)+RATE_MEASURE(1000)+COAST_MEASURE(up to 2000) plus margin
-  static constexpr int RATE_MEASURE_MS = 1000;        // time to run at the finalized turn speed before sampling the steady-state rate
-  static constexpr int COAST_CONFIRM_MS = 200;         // gyro must stay quiet this long before declaring the coast-down finished
-  static constexpr int COAST_MEASURE_TIMEOUT_MS = 2000; // safety cap in case the gyro never quiets down (e.g. sensor noise)
+  // BASELINE(500) + STRAIGHT(5000+~320 blocking stop) + SETTLE(~800+) + TURN_RIGHT_MEASURE(up to 8000+~320)
+  // + STOP_RIGHT_MEASURE(up to 6000) + TURN_LEFT_MEASURE(up to 8000+~320) + STOP_LEFT_MEASURE(up to 6000)
+  // ~= 35.5s worst case, plus margin -- SETTLE has no timeout of its own beyond SETTLE_MS, so this leaves
+  // ~15s of slack for it to overrun before the whole run spuriously fails via this global timeout.
+  static constexpr int TIMEOUT_MS = 50000;
+  static constexpr int TURN_MIN_DURATION_MS = 4000;    // the issue's "at least 4 seconds"
+  static constexpr int TURN_MAX_DURATION_MS = 8000;    // if the plateau hasn't latched by TURN_MIN_DURATION_MS, keep going up to here; still unlatched -> fail
+  static constexpr int STOP_MEASURE_TIMEOUT_MS = 6000; // real measured stop/coast time on hardware is ~3s; this gives ~2x margin. Reaching this is a FAILURE (not a silent cap that corrupts the measurement -- this was the root cause of the previous calibration's failure).
+  static constexpr int STOP_CONFIRM_MS = 200;          // same idiom as the old COAST_CONFIRM_MS
+  // The issue's "5%" -- used ONLY for ramp-up plateau detection. On real hardware data, consecutive-read
+  // percentage deltas during ramp-down stay well above 5% for nearly the whole descent (the absolute step
+  // size is roughly constant while the current value shrinks, so the percentage relative to a shrinking
+  // base doesn't drop) and become erratic near zero, so a "<5%" test doesn't reliably fire near actual idle.
+  // An absolute deadband near idle (RZ_DEADBAND_DPS, matching the idiom used elsewhere in this class) is
+  // what actually detects "stopped" -- see _trackStop.
+  static constexpr float RZ_SIGNIFICANT_FRACTION = 0.05f;
   static constexpr float RZ_DEADBAND_DPS = 3.0f;      // settle-phase "has stopped rotating" threshold
-  static constexpr float TURN_DETECT_DPS = 15.0f;     // ramp "robot is now turning" threshold
+  static constexpr float TURN_DETECT_DPS = 15.0f;     // "robot is now turning" threshold
   static constexpr float BIAS_UNITS_PER_DEGREE = 0.2f;
   static constexpr float MIN_DRIFT_DEGREES = 3.0f;    // below this, treat as already straight
   static constexpr float RZ_POSITIVE_IS_RIGHT = 1.0f; // sign convention; flip to -1.0f if hardware verification shows it's backwards
-  static const uint8_t RAMP_START_POWER_DIVISOR = 2;  // ramp starts at DRIVE_SPEED/2, per "half the power used for moving straight"
-  static const uint8_t TURN_POWER_STEP = 5;
-  static const uint8_t TURN_SPEED_MARGIN = 5;         // extra power above the detected threshold, so the calibrated turn power reliably sustains motion, not just starts it
 
   IRobotMotors& _motors;
   ISmoothMovement& _movement;
@@ -46,15 +56,18 @@ private:
   bool _lastTimedOut = false;
   int _startedAt = 0;
   int _phaseStartedAt = 0;
-  int _stepStartedAt = 0;
   int _lastTick = 0;
   float _rzBaseline = 0;
   float _driftDegrees = 0;
-  uint8_t _rampPower = 0;
-  int _rateMeasureStartedAt = 0;
-  int _coastMeasureStartedAt = 0;
-  int _coastQuietSince = 0;
-  float _coastAccumDegrees = 0;
+  float _idleRzForTurn = 0;
+  int   _turnStartedAt = 0;      // fresh millis() taken right after the turn command was issued
+  int   _stopStartedAt = 0;      // fresh millis() taken right after the blocking move("stop") returned
+  int   _stopQuietSince = 0;     // first instant rz entered the idle deadband this stop-measure phase; 0 = not in band
+  float _turnExtremeRz = 0;      // running min (right turn) / max (left turn) over the whole turn-measure phase
+  float _turnPrevRz = 0;         // previous rz read, for the 5% consecutive-delta plateau test
+  bool  _plateauLatched = false;
+  int   _plateauReachedAt = 0;   // millis() at the latch instant
+  int   _turnSampleCount = 0;    // diagnostic: number of _step() calls from turn start to the plateau latch -- printed in the finish report so the operator can sanity-check the calibration model on real hardware
 
   void _finish(bool ok, bool timedOut) {
     _motors.move("stop");
@@ -63,8 +76,63 @@ private:
     _lastTimedOut = timedOut;
   }
 
+  /// @brief Enters a turn-measure phase: issues the turn through the normal move() path (same speed/bias a
+  /// real point-to-bearing turn will use) and resets the tracking state.
+  void _beginTurnMeasure(bool right, float rz) {
+    _motors.move(right ? "turn_right" : "turn_left");
+    int afterStart = millis();
+    _turnStartedAt = afterStart;
+    _lastTick = afterStart;
+    _turnExtremeRz = rz;
+    _turnPrevRz = rz;
+    _plateauLatched = false;
+    _plateauReachedAt = 0;
+    _turnSampleCount = 0;
+  }
+
+  /// @brief Per-iteration tracking for a turn-measure phase: running extreme value + 5% consecutive-delta
+  /// plateau latch. Returns true once the turn should end (plateau latched AND at least TURN_MIN_DURATION_MS
+  /// elapsed).
+  bool _trackTurn(int now, float rz, bool right) {
+    _turnSampleCount++;
+    if (right) { if (rz < _turnExtremeRz) _turnExtremeRz = rz; }
+    else       { if (rz > _turnExtremeRz) _turnExtremeRz = rz; }
+
+    bool moving = fabsf(rz - _idleRzForTurn) > TURN_DETECT_DPS; // guards the 5% test against firing while still near idle
+    if (!_plateauLatched && moving) {
+      float delta = fabsf(rz - _turnPrevRz);
+      if (delta < RZ_SIGNIFICANT_FRACTION * fabsf(rz)) {
+        _plateauLatched = true;
+        _plateauReachedAt = now;
+      }
+    }
+    _turnPrevRz = rz;
+
+    int elapsed = now - _turnStartedAt;
+    return _plateauLatched && elapsed >= TURN_MIN_DURATION_MS;
+  }
+
+  /// @brief Enters a stop-measure phase right after a blocking move("stop") call. Must be called with a
+  /// FRESHLY-taken millis() value (see comment at the RATE_MEASURE->COAST_MEASURE transition this replaces) --
+  /// never the stale `now` parameter from before the blocking call, or the next update() call's dt would
+  /// misattribute the blocked time.
+  void _beginStopMeasure(int afterStop) {
+    _lastTick = afterStop;
+    _stopStartedAt = afterStop;
+    _stopQuietSince = 0;
+  }
+
+  /// @brief Per-iteration tracking for a stop-measure phase: an absolute idle-deadband check (NOT the 5% rule
+  /// -- see class doc comment for why), sustained for STOP_CONFIRM_MS. Returns true once confirmed stopped.
+  bool _trackStop(int now, float rz) {
+    bool quiet = fabsf(rz - _idleRzForTurn) < RZ_DEADBAND_DPS;
+    if (quiet) { if (_stopQuietSince == 0) _stopQuietSince = now; }
+    else       { _stopQuietSince = 0; }
+    return _stopQuietSince != 0 && (now - _stopQuietSince) >= STOP_CONFIRM_MS;
+  }
+
   // Feeds the current smoothed rz (deg/s) into the state machine. Returns true the iteration the whole
-  // chain (straight-line + turn) finishes, whether successfully or not.
+  // chain (straight-line + turns) finishes, whether successfully or not.
   bool _step(int now, float rz) {
     if (_phase == IDLE) return false;
     int dt = now - _lastTick;
@@ -105,67 +173,61 @@ private:
       case SETTLE:
         if (now - _phaseStartedAt >= SETTLE_MS && fabsf(rz - _rzBaseline) < RZ_DEADBAND_DPS) {
           _rzBaseline = rz;
-          _rampPower = _motors.getDriveSpeed() / RAMP_START_POWER_DIVISOR;
-          _motors.turnAtSpeed("turn_right", _rampPower);
-          _stepStartedAt = now;
-          _phase = TURN_RAMP;
+          _idleRzForTurn = rz;
+          _motors.setIdleRz1(rz); // the issue's "Record the idle rz into _idleRz1"
+          _beginTurnMeasure(true, rz);
+          _phase = TURN_RIGHT_MEASURE;
         }
         break;
 
-      case TURN_RAMP:
-        if (now - _stepStartedAt >= RAMP_STEP_MS) {
-          if (fabsf(rz - _rzBaseline) > TURN_DETECT_DPS) {
-            _motors.setTurnSpeed(_rampPower + TURN_SPEED_MARGIN);
-            _motors.turnAtSpeed("turn_right", _motors.getTurnSpeed());
-            _rateMeasureStartedAt = now;
-            _phase = RATE_MEASURE;
-          } else {
-            _rampPower += TURN_POWER_STEP;
-            if (_rampPower > 100) {
-              _finish(false, false);
-              return true;
-            }
-            _motors.turnAtSpeed("turn_right", _rampPower);
-            _stepStartedAt = now;
-          }
-        }
-        break;
-
-      case RATE_MEASURE:
-        if (now - _rateMeasureStartedAt >= RATE_MEASURE_MS) {
-          // rz is already the smoothed (trimmed-mean) reading from SmoothMovement; after RATE_MEASURE_MS of
-          // sustained turning at the finalized speed the buffer is fully refreshed, so this one sample is
-          // effectively the steady-state rate.
-          _motors.setTurnRateDps(fabsf(rz));
-          _motors.move("stop"); // blocks for the brake pulse + settle delay (~320ms) -- re-stamp timing below using
-                                 // a fresh millis() read taken AFTER this returns, not the stale `now` parameter,
-                                 // so the next update() call's dt doesn't misattribute the blocked time as coast.
-          int afterStop = millis();
-          _lastTick = afterStop;
-          _coastAccumDegrees = 0;
-          _coastQuietSince = 0;
-          _coastMeasureStartedAt = afterStop;
-          _phase = COAST_MEASURE;
-        }
-        break;
-
-      case COAST_MEASURE: {
-        _coastAccumDegrees += fabsf(rz - _rzBaseline) * dt / 1000.0f;
-        bool quiet = fabsf(rz - _rzBaseline) < RZ_DEADBAND_DPS;
-        if (quiet) {
-          if (_coastQuietSince == 0) _coastQuietSince = now;
-        } else {
-          _coastQuietSince = 0;
-        }
-        bool settled = _coastQuietSince != 0 && (now - _coastQuietSince) >= COAST_CONFIRM_MS;
-        bool coastTimedOut = (now - _coastMeasureStartedAt) >= COAST_MEASURE_TIMEOUT_MS;
-        if (settled || coastTimedOut) {
-          _motors.setTurnCoastDegrees(_coastAccumDegrees);
-          _finish(true, false);
+      case TURN_RIGHT_MEASURE:
+        if (_trackTurn(now, rz, true)) {
+          _motors.setMinimumRzWhenTurningRight(_turnExtremeRz);
+          _motors.setTimeInMillisecondsToReachMinimumRzWhenTurningRight(_plateauReachedAt - _turnStartedAt);
+          _motors.move("stop"); // blocks ~320ms
+          _beginStopMeasure(millis()); // fresh timestamp taken AFTER the blocking call returns
+          _phase = STOP_RIGHT_MEASURE;
+        } else if (now - _turnStartedAt >= TURN_MAX_DURATION_MS) {
+          _finish(false, false); // never plateaued within the max window -- no trustworthy ramp time
           return true;
         }
         break;
-      }
+
+      case STOP_RIGHT_MEASURE:
+        if (_trackStop(now, rz)) {
+          _motors.setTimeInMillisecondsToStopWhenTurningRight(_stopQuietSince - _stopStartedAt);
+          _rzBaseline = rz;
+          _beginTurnMeasure(false, rz);
+          _phase = TURN_LEFT_MEASURE;
+        } else if (now - _stopStartedAt >= STOP_MEASURE_TIMEOUT_MS) {
+          _finish(false, false); // reaching the timeout is a genuine failure, not a silent measurement cap
+          return true;
+        }
+        break;
+
+      case TURN_LEFT_MEASURE:
+        if (_trackTurn(now, rz, false)) {
+          _motors.setMaximumRzWhenTurningLeft(_turnExtremeRz);
+          _motors.setTimeInMillisecondsToReachMaximumRzWhenTurningLeft(_plateauReachedAt - _turnStartedAt);
+          _motors.move("stop");
+          _beginStopMeasure(millis());
+          _phase = STOP_LEFT_MEASURE;
+        } else if (now - _turnStartedAt >= TURN_MAX_DURATION_MS) {
+          _finish(false, false);
+          return true;
+        }
+        break;
+
+      case STOP_LEFT_MEASURE:
+        if (_trackStop(now, rz)) {
+          _motors.setTimeInMillisecondsToStopWhenTurningLeft(_stopQuietSince - _stopStartedAt);
+          _finish(true, false);
+          return true;
+        } else if (now - _stopStartedAt >= STOP_MEASURE_TIMEOUT_MS) {
+          _finish(false, false);
+          return true;
+        }
+        break;
 
       default:
         break;
@@ -180,13 +242,17 @@ private:
     Monitor.println();
     Monitor.println("--- FINISH MOTOR CALIBRATION ---");
     Monitor.print("drift="); Monitor.print(getDriftDegrees(), 2);
-    Monitor.print("deg  ramp_power="); Monitor.print(getRampPower());
-    Monitor.print("  timeout="); Monitor.print(timedOut ? "yes" : "no");
+    Monitor.print("deg  timeout="); Monitor.print(timedOut ? "yes" : "no");
     Monitor.print("  ok="); Monitor.println(ok ? "yes" : "no");
     Monitor.print("straight_bias="); Monitor.print(_motors.getStraightBias());
-    Monitor.print("  turn_speed="); Monitor.println(_motors.getTurnSpeed());
-    Monitor.print("turn_rate_dps="); Monitor.print(_motors.getTurnRateDps(), 2);
-    Monitor.print("  turn_coast_deg="); Monitor.println(_motors.getTurnCoastDegrees(), 2);
+    Monitor.print("  idle_rz="); Monitor.println(_motors.getIdleRz1(), 2);
+    Monitor.print("right: min_rz="); Monitor.print(_motors.getMinimumRzWhenTurningRight(), 2);
+    Monitor.print("  ramp_ms="); Monitor.print(_motors.getTimeInMillisecondsToReachMinimumRzWhenTurningRight());
+    Monitor.print("  stop_ms="); Monitor.println(_motors.getTimeInMillisecondsToStopWhenTurningRight());
+    Monitor.print("left:  max_rz="); Monitor.print(_motors.getMaximumRzWhenTurningLeft(), 2);
+    Monitor.print("  ramp_ms="); Monitor.print(_motors.getTimeInMillisecondsToReachMaximumRzWhenTurningLeft());
+    Monitor.print("  stop_ms="); Monitor.println(_motors.getTimeInMillisecondsToStopWhenTurningLeft());
+    Monitor.print("turn_samples_to_plateau="); Monitor.println(_turnSampleCount);
     Monitor.println("---------------------------");
     Monitor.flush();
     _display.print(ok ? "rdy" : "e8");
@@ -202,8 +268,6 @@ public:
   Phase getPhase() { return _phase; }
   /// @brief Cumulative rz-integrated drift, in degrees, accumulated during the straight-line phase.
   float getDriftDegrees() { return _driftDegrees; }
-  /// @brief Current (or final) turn power used by the turn-ramp phase.
-  uint8_t getRampPower() { return _rampPower; }
   /// @brief Whether the most recently finished run succeeded.
   bool getLastResultOk() { return _lastResultOk; }
   /// @brief Whether the most recently finished run ended via timeout rather than completing normally.
@@ -237,8 +301,9 @@ public:
   bool update(int now) override {
     if (_phase == IDLE && _lastReportedPhase == IDLE) return false;
     if (_phase != _lastReportedPhase) {
-      if (_phase == BASELINE)       _display.print("cms");
-      else if (_phase == TURN_RAMP) _display.print("cmt");
+      if (_phase == BASELINE)               _display.print("cms");
+      else if (_phase == TURN_RIGHT_MEASURE) _display.print("cmt");
+      else if (_phase == TURN_LEFT_MEASURE)  _display.print("cml");
       _lastReportedPhase = _phase;
     }
     float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
@@ -251,12 +316,12 @@ public:
     return false;
   }
 
-  /// @brief Prints the motor calibration run's drift/ramp power while it is in progress.
+  /// @brief Prints the motor calibration run's drift/live tracked extreme rz while it is in progress.
   void showStatus() override {
     if (isActive()) {
       Monitor.print(" MCL: drift=");
       monitorPrintLeftJustified(getDriftDegrees(), 6);
-      Monitor.print(" pwr="); monitorPrintLeftJustified((int)getRampPower(), 3);
+      Monitor.print(" rz="); monitorPrintLeftJustified(_turnExtremeRz, 6);
     }
   }
 };
