@@ -15,7 +15,7 @@ on the status lines each side prints once a second:
       - SmoothDistance -> " DST: <n>cm" (or "Distance NOK" if unwired)
       - SmoothMovement -> " ax=<n> ay=<n> ..." (or "Movement NOK" if unwired)
       - RobotMotors    -> " MOT: <status>"
-      - MotorCalibration -> " MCL: drift=<n> pwr=<n>" (only while a motor calibration run is active)
+      - MotorCalibration -> " MCL: drift=<n> rz=<n>" (only while a motor calibration run is active)
   - `arduino-app-cli app logs <remote_dir> --follow` -- the Python app's own
     stdout (confirmed via `arduino-app-cli app logs --help`: "Show the logs of
     the Python app" -- it does NOT carry the MCU's Monitor output, the two are

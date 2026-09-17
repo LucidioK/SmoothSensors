@@ -19,7 +19,7 @@
 #define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
 // Status output interval while the robot is moving. Also gates _monitorDistance's distance-sensor refresh
 // cadence (_statusTimeSpan/10) -- at 200ms this made sensor polling too coarse for MotorCalibration's
-// turn-ramp phase to see a fresh gyro reading within its 600ms detection window, causing spurious e8
+// turn-measure phases to see a fresh gyro reading in time for their plateau detection, causing spurious e8
 // failures on real hardware; 50ms fixed it (confirmed on-device).
 #define STATUS_TIMESPAN_WHEN_MOVING_MS 50
 

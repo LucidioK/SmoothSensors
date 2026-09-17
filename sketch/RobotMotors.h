@@ -15,13 +15,23 @@ private:
   static const uint8_t DRIVE_SPEED = 90;
   static const uint8_t MAX_SPEED_PERCENT   = 100;                             // ModulinoMotors::setSpeedA/B silently reject >100
   static const uint8_t MAX_STRAIGHT_BIAS   = MAX_SPEED_PERCENT - DRIVE_SPEED; // headroom above DRIVE_SPEED (==10 today)
+  static constexpr float TURN_CALIBRATED_MIN_DPS = 10.0f; // "has turn calibration actually run" gate
+  static constexpr int MAX_TURN_DURATION_MS = 8000; // sanity ceiling on a single blocking turn pulse -- matches
+                                                       // MotorCalibration's own TURN_MAX_DURATION_MS; a computed
+                                                       // duration beyond this means the calibration data can't be
+                                                       // trusted for this turn, so fall back to the uncalibrated path
+                                                       // rather than blindly blocking for an unbounded time.
   ModulinoMotors _motors;
   bool _ok = false;
   String _status = "";
   int8_t  _straightBias = 0;   // >0 => robot veers RIGHT => left(A) gets +bias, right(B) gets -bias
-  uint8_t _turnSpeed    = DRIVE_SPEED; // pre-calibration fallback == today's exact behavior
-  float _turnRateDps = 0;        // degrees/sec measured at _turnSpeed once rotation is fully established
-  float _turnCoastDegrees = 0;   // degrees the robot continues to rotate, from momentum, after move("stop") is issued at _turnSpeed
+  float _idleRz1 = 0;
+  float _minimumRzWhenTurningRight = 0;
+  int   _timeInMillisecondsToReachMinimumRzWhenTurningRight = 0;
+  int   _timeInMillisecondsToStopWhenTurningRight = 0;
+  float _maximumRzWhenTurningLeft = 0;
+  int   _timeInMillisecondsToReachMaximumRzWhenTurningLeft = 0;
+  int   _timeInMillisecondsToStopWhenTurningLeft = 0;
 
   static const uint8_t BRAKE_POWER_PERCENT = 50; // % of the just-commanded speed used for the reverse-power braking pulse
   static const int BRAKE_PULSE_MS = 120;         // duration of the reverse-power pulse -- long enough to arrest momentum, short enough not to reverse travel
@@ -33,8 +43,8 @@ private:
 
   // Heading tolerance for "close enough" to a point-to-bearing target, absorbing residual smoothing lag and post-calibration magnetic noise.
   static constexpr float POINT_TOLERANCE_DEGREES = 8.0f;
-  // Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle. Turns now run
-  // at the calibrated, potentially slower, turn power.
+  // Hard timeout for a point-to-bearing turn, bounding every turn/settle/re-check cycle. Turns are now
+  // either an exact blocking timed pulse (calibrated) or the original compass-threshold loop (uncalibrated fallback).
   static constexpr int POINT_TIMEOUT_MS = 20000;
   // Minimum dwell time after stopping before trusting a heading reading, giving the ring buffer time to refill with post-stop samples.
   static constexpr int POINT_SETTLE_MS = 500;
@@ -131,25 +141,51 @@ private:
     return error >= 0 ? "turn_right" : "turn_left";
   }
 
-  /// @brief Computes how long to actively drive a turn of the given magnitude so that, after the robot's
-  /// measured momentum-coast is accounted for, it lands close to the target. Returns -1 if turn rate hasn't
-  /// been calibrated yet (RobotMotors::getTurnRateDps() == 0) -- callers must fall back to the compass-threshold
-  /// stopping trigger in that case.
-  int _computeTurnDurationMs(float errorDegrees) {
-    float rateDps = _turnRateDps;
-    if (rateDps <= 0.1f) return -1;
-    float activeDegrees = errorDegrees - _turnCoastDegrees;
-    if (activeDegrees < 0) activeDegrees = 0;
-    return (int)(activeDegrees / rateDps * 1000.0f);
+  /// @brief Open-loop duration for a turn of the given magnitude, from the trapezoid area under the
+  /// smoothed yaw curve: degrees = peak * (active - ramp/2 + stop/2) / 1000, solved for active. Direction-
+  /// specific because the two directions measure meaningfully different peak rates on real hardware.
+  /// Returns -1 when turn calibration hasn't run this boot -- callers fall back to the compass-threshold
+  /// stopping trigger. Also returns -1 when the computed duration exceeds MAX_TURN_DURATION_MS -- an
+  /// untrustworthy calibration (e.g. a peak dps just above TURN_CALIBRATED_MIN_DPS) could otherwise compute
+  /// a very large duration, and _beginTurn's blocking delay() has no other way to be interrupted.
+  int _computeTurnDurationMs(float errorDegrees, bool turningRight) {
+    float peak, rampMs, stopMs;
+    if (turningRight) {
+      peak   = fabsf(_minimumRzWhenTurningRight - _idleRz1);
+      rampMs = (float)_timeInMillisecondsToReachMinimumRzWhenTurningRight;
+      stopMs = (float)_timeInMillisecondsToStopWhenTurningRight;
+    } else {
+      peak   = fabsf(_maximumRzWhenTurningLeft - _idleRz1);
+      rampMs = (float)_timeInMillisecondsToReachMaximumRzWhenTurningLeft;
+      stopMs = (float)_timeInMillisecondsToStopWhenTurningLeft;
+    }
+    if (peak < TURN_CALIBRATED_MIN_DPS) return -1;
+    float ms = fabsf(errorDegrees) * 1000.0f / peak + 0.5f * rampMs - 0.5f * stopMs;
+    if (ms < 0) ms = 0;
+    if (ms > MAX_TURN_DURATION_MS) return -1; // untrustworthy for this turn size -- fall back rather than block unboundedly
+    return (int)ms;
   }
 
-  /// @brief Starts (or restarts, on a correction pass) driving a turn toward the given heading error, arming
-  /// a precomputed timed cutoff (see _computeTurnDurationMs) alongside the existing compass-threshold/sign-flip
-  /// triggers checked in updatePointing.
+  /// @brief Starts a turn toward the given heading error. When turn calibration is available the turn is
+  /// executed as a precise, blocking open-loop pulse (command turn, delay() for the calculated duration,
+  /// stop) -- a loop-polled cutoff is far too coarse at full turn rate (tens of degrees per loop iteration).
+  /// This leaves _pointState in POINT_SETTLING when calibrated. Uncalibrated, it falls back to the existing
+  /// compass-threshold/sign-flip triggers in updatePointing by leaving _pointState in POINT_TURNING.
   void _beginTurn(float error) {
-    move(_turnCommandFor(error));
+    bool right = error >= 0; // matches _turnCommandFor()'s convention
+    int durationMs = _computeTurnDurationMs(fabsf(error), right);
+    move(right ? "turn_right" : "turn_left");
     _pointTurnStartedAt = millis();
-    _pointTurnDurationMs = _computeTurnDurationMs(fabsf(error));
+    _pointTurnDurationMs = durationMs;
+    if (durationMs < 0) {
+      _pointState = POINT_TURNING; // uncalibrated fallback -- updatePointing's threshold/sign-flip triggers drive it
+      return;
+    }
+    delay(durationMs);
+    move("stop"); // blocks further (~320ms) for the brake pulse + settle delay
+    _pointState = POINT_SETTLING;
+    _pointSettleStartedAt = millis(); // fresh timestamp -- the caller's `now` is stale by durationMs+~320ms after this
+    _pointSettleSamples = 0;
   }
 
   /// @brief Stops the point-to-bearing turn and reports the result.
@@ -209,12 +245,12 @@ public:
     else if (command == "turn_right")
     {
       _status = "TRG";
-      _drive(true, false, _turnSpeed, _turnSpeed);
+      _drive(true, false, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
     }
     else if (command == "turn_left")
     {
       _status = "TLF";
-      _drive(false, true, _turnSpeed, _turnSpeed);
+      _drive(false, true, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
     }
     else if (command == "stop")
     {
@@ -240,21 +276,20 @@ public:
 
   int8_t getStraightBias() override { return _straightBias; }
   void setStraightBias(int8_t bias) override { _straightBias = (int8_t)constrain((int)bias, -(int)MAX_STRAIGHT_BIAS, (int)MAX_STRAIGHT_BIAS); }
-  uint8_t getTurnSpeed() override { return _turnSpeed; }
-  void setTurnSpeed(uint8_t speed) override { _turnSpeed = _clamp(speed); }
-  float getTurnRateDps() override { return _turnRateDps; }
-  void setTurnRateDps(float dps) override { _turnRateDps = dps < 0 ? 0 : dps; }
-  float getTurnCoastDegrees() override { return _turnCoastDegrees; }
-  void setTurnCoastDegrees(float degrees) override { _turnCoastDegrees = degrees < 0 ? 0 : degrees; }
-
-  // Drives a turn at an explicit power without mutating _turnSpeed -- used by the calibration ramp so a
-  // cancelled/failed calibration run leaves no bogus turn speed behind.
-  bool turnAtSpeed(const String& command, uint8_t speed) override {
-    if (!_ok) return false;
-    if (command == "turn_right") { _status = "TRG"; _drive(true, false, speed, speed); return true; }
-    if (command == "turn_left")  { _status = "TLF"; _drive(false, true, speed, speed); return true; }
-    return false;
-  }
+  float getIdleRz1() override { return _idleRz1; }
+  void setIdleRz1(float rz) override { _idleRz1 = rz; }
+  float getMinimumRzWhenTurningRight() override { return _minimumRzWhenTurningRight; }
+  void setMinimumRzWhenTurningRight(float rz) override { _minimumRzWhenTurningRight = rz; }
+  int getTimeInMillisecondsToReachMinimumRzWhenTurningRight() override { return _timeInMillisecondsToReachMinimumRzWhenTurningRight; }
+  void setTimeInMillisecondsToReachMinimumRzWhenTurningRight(int ms) override { _timeInMillisecondsToReachMinimumRzWhenTurningRight = ms; }
+  int getTimeInMillisecondsToStopWhenTurningRight() override { return _timeInMillisecondsToStopWhenTurningRight; }
+  void setTimeInMillisecondsToStopWhenTurningRight(int ms) override { _timeInMillisecondsToStopWhenTurningRight = ms; }
+  float getMaximumRzWhenTurningLeft() override { return _maximumRzWhenTurningLeft; }
+  void setMaximumRzWhenTurningLeft(float rz) override { _maximumRzWhenTurningLeft = rz; }
+  int getTimeInMillisecondsToReachMaximumRzWhenTurningLeft() override { return _timeInMillisecondsToReachMaximumRzWhenTurningLeft; }
+  void setTimeInMillisecondsToReachMaximumRzWhenTurningLeft(int ms) override { _timeInMillisecondsToReachMaximumRzWhenTurningLeft = ms; }
+  int getTimeInMillisecondsToStopWhenTurningLeft() override { return _timeInMillisecondsToStopWhenTurningLeft; }
+  void setTimeInMillisecondsToStopWhenTurningLeft(int ms) override { _timeInMillisecondsToStopWhenTurningLeft = ms; }
 
   /// @brief Whether the given RPC command string names a point-to-bearing target.
   bool isBearingCommand(const String& command) override {
@@ -285,7 +320,6 @@ public:
       _pointSettleStartedAt = millis();
       _pointSettleSamples = 0;
     } else {
-      _pointState = POINT_TURNING;
       _beginTurn(_pointLastError);
     }
     return true;
@@ -326,7 +360,6 @@ public:
           finished = true;
         } else {
           _pointLastError = error;
-          _pointState = POINT_TURNING;
           _beginTurn(error);
         }
       }
