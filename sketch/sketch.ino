@@ -7,13 +7,21 @@
 #include "SmoothMovement.h"
 #include "LedMatrixDisplay.h"
 #include "RobotMotors.h"
+#include "CompassCalibration.h"
+#include "MotorCalibration.h"
+#include "CombinedCalibration.h"
+#include "MonitorFormat.h"
+
 
 // Sentinel distance used when the distance sensor has no usable reading.
 #define INFINITE_DISTANCE 1000000
 // Status output interval while the robot is stationary.
 #define STATUS_TIMESPAN_WHEN_NOT_MOVING_MS 2000
-// Status output interval while the robot is moving.
-#define STATUS_TIMESPAN_WHEN_MOVING_MS 200
+// Status output interval while the robot is moving. Also gates _monitorDistance's distance-sensor refresh
+// cadence (_statusTimeSpan/10) -- at 200ms this made sensor polling too coarse for MotorCalibration's
+// turn-measure phases to see a fresh gyro reading in time for their plateau detection, causing spurious e8
+// failures on real hardware; 50ms fixed it (confirmed on-device).
+#define STATUS_TIMESPAN_WHEN_MOVING_MS 50
 
 // RPC handler that writes a short message to the LED matrix.
 bool show_text(String text);
@@ -29,10 +37,16 @@ private:
   SmoothMovement _movement;
   /// @brief Instance of the LedMatrixDisplay class for managing the LED matrix display.
   LedMatrixDisplay _ledMatrix;
-  /// @brief Instance of the RobotMotors class for managing the robot's motors.
-  RobotMotors _robotMotors;
   /// @brief Instance of the SmoothCompass class for reading robot bearings with relation to Earth.
   SmoothCompass _compass;
+  /// @brief Instance of the RobotMotors class for managing the robot's motors.
+  RobotMotors _robotMotors;
+  /// @brief Drives the motor-powered, gyro-closed-loop compass calibration spin.
+  CompassCalibration _calibration;
+  /// @brief Drives the motor-powered, gyro-closed-loop motor calibration (straight-line bias + turn power).
+  MotorCalibration _motorCalibration;
+  /// @brief Runs the motor calibration followed by the compass calibration as one "calibrate" command.
+  CombinedCalibration _combinedCalibration;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -65,7 +79,7 @@ private:
       if (_distanceOk)
       {
         Monitor.print(" DST: ");
-        Monitor.print(_distanceCm);
+        monitorPrintLeftJustified(_distanceCm, 3);
         Monitor.print("cm");
       }
       else
@@ -80,12 +94,12 @@ private:
       // Smoothed acceleration and rotation values for each sensor axis.
       float ax=0,ay=0,az=0,rx=0,ry=0,rz=0;
       _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
-      Monitor.print(" ax="); Monitor.print(ax);
-      Monitor.print(" ay="); Monitor.print(ay);
-      Monitor.print(" az="); Monitor.print(az);
-      Monitor.print(" rx="); Monitor.print(rx);
-      Monitor.print(" ry="); Monitor.print(ry);
-      Monitor.print(" rz="); Monitor.print(rz);
+      Monitor.print(" ax="); monitorPrintLeftJustified(ax, 6);
+      Monitor.print(" ay="); monitorPrintLeftJustified(ay, 6);
+      Monitor.print(" az="); monitorPrintLeftJustified(az, 6);
+      Monitor.print(" rx="); monitorPrintLeftJustified(rx, 6);
+      Monitor.print(" ry="); monitorPrintLeftJustified(ry, 6);
+      Monitor.print(" rz="); monitorPrintLeftJustified(rz, 6);
     }
     else
     {
@@ -104,41 +118,51 @@ private:
     Monitor.print(_compass.getError());
     if (_compassOk) {
       Monitor.print(" ");
-      Monitor.print(_compass.getDirectionAngle());
+      monitorPrintLeftJustified(_compass.getDirectionAngle(), 6);
       Monitor.print(" ");
-      Monitor.print(_compass.getDirectionBearing());
+      monitorPrintLeftJustified(_compass.getDirectionBearing(), 3);
     }
   }
 
-
   void _monitorDistance(int now) {
     _distanceCm = _distance.getDistanceCm();
-    if (now - _previousDistanceRead > STATUS_TIMESPAN_WHEN_MOVING_MS / 10)
+    if (now - _previousDistanceRead > _statusTimeSpan / 10)
     {
       // Refresh the distance reading more often than the status output.
       _distanceCm = _distanceCm ? _distanceCm : INFINITE_DISTANCE;
       _previousDistanceRead = now;
-      if (_distanceCm < 10) {
-        move("stop");
-        if (_motorsOk) {
-          // Convert the short distance value before displaying it on the matrix.
-          char buf[4];
-          show_text(String(itoa(_distanceCm, buf, 10)));
+      if (!_calibration.isActive() && !_robotMotors.isPointing()) {
+        if (_distanceCm < 10) {
+          move("stop");
+          if (_motorsOk) {
+            // Convert the short distance value before displaying it on the matrix.
+            char buf[4];
+            show_text(String(itoa(_distanceCm, buf, 10)));
+          }
+          _alreadyAlertedAboutDistance = true;
         }
-        _alreadyAlertedAboutDistance = true;
-      }
-      else if (_alreadyAlertedAboutDistance) {
-        _alreadyAlertedAboutDistance = false;
-        if (_motorsOk) {
-          show_text("_");
+        else if (_alreadyAlertedAboutDistance) {
+          _alreadyAlertedAboutDistance = false;
+          if (_motorsOk) {
+            show_text("_");
+          }
         }
       }
     }
   }
 
+  void _onFeatureStarted() {
+    _alreadyAlertedAboutDistance = false;
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_MOVING_MS;
+  }
+
+  void _onFeatureStopped() {
+    _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
+  }
+
   void _showMonitorLine(int now) {
     int timespan = now - _previousTimestamp;
-    if (timespan > STATUS_TIMESPAN_WHEN_MOVING_MS)
+    if (timespan > _statusTimeSpan)
     {
       Monitor.flush();
   
@@ -147,9 +171,11 @@ private:
         Monitor.println();
         Monitor.println("=========================== SmoothSensors003...");
         Monitor.println();
+        Monitor.flush();
         _alreadyShowedAppName = true;
       }
 
+      monitorPrintLeftJustified(now, 8);
       _hl = (_hl == HIGH) ? LOW : HIGH;
       digitalWrite(LED_BUILTIN, _hl);
       _previousTimestamp = now;
@@ -162,6 +188,12 @@ private:
 
       _showCompass();
 
+      _calibration.showStatus();
+
+      _motorCalibration.showStatus();
+
+      _robotMotors.showPointingStatus();
+
       Monitor.println();
       Monitor.flush();
     }
@@ -169,7 +201,7 @@ private:
 
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
-  SketchClass() {
+  SketchClass() : _robotMotors(_compass, _movement, _ledMatrix), _calibration(_compass, _movement, _robotMotors, _ledMatrix), _motorCalibration(_robotMotors, _movement, _ledMatrix), _combinedCalibration(_motorCalibration, _calibration) {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -225,6 +257,13 @@ public:
       _movement.record();
     }
   
+    if (_combinedCalibration.update(now)) {
+      _onFeatureStopped();
+    }
+    if (_robotMotors.updatePointing(now)) {
+      _onFeatureStopped();
+    }
+
     _monitorDistance(now);
     _showMonitorLine(now);
   
@@ -240,8 +279,44 @@ public:
   /// @brief Applies an RPC movement command and updates the report interval.
   bool moveImplementation(String command)
   {
-    _statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
+    bool alreadyStopped = false;
 
+    if (_combinedCalibration.isActive()) {
+      if (command == "calibrate") {
+        // Already calibrating: ignore the repeat trigger and let the in-progress sequence continue.
+        return true;
+      }
+      _combinedCalibration.cancel();
+      _onFeatureStopped();
+      alreadyStopped = true;
+    }
+
+    if (_robotMotors.isPointing()) {
+      if (_robotMotors.isPointingAt(command)) return true;
+      _robotMotors.cancelPointing();
+      _onFeatureStopped();
+      alreadyStopped = true;
+    }
+
+    if (command == "calibrate") {
+      bool ok = _combinedCalibration.start();
+      if (ok) _onFeatureStarted();
+      return ok;
+    }
+
+    if (_robotMotors.isBearingCommand(command)) {
+      bool ok = _robotMotors.startPointing(command, _calibration.hasSucceededOnce());
+      if (ok) _onFeatureStarted();
+      return ok;
+    }
+
+    if (alreadyStopped && command == "stop") {
+      // A cancellation above already stopped the motors (which blocks ~400ms) and called
+      // _onFeatureStopped(); avoid stopping twice.
+      return true;
+    }
+
+    _statusTimeSpan = command == "stop" ? STATUS_TIMESPAN_WHEN_NOT_MOVING_MS : STATUS_TIMESPAN_WHEN_MOVING_MS;
     return _robotMotors.move(command);
   }
 

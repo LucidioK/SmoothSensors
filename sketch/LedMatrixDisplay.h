@@ -4,8 +4,9 @@
 #include <Arduino.h>
 #include <Arduino_LED_Matrix.h>
 #include <ArduinoGraphics.h>
+#include "ILedMatrixDisplay.h"
 
-class LedMatrixDisplay
+class LedMatrixDisplay : public ILedMatrixDisplay
 {
 private:
   static const int CHAR_COUNT = 3;
@@ -17,13 +18,13 @@ public:
   {
   }
 
-  bool initialize()
+  bool initialize() override
   {
     _matrix.begin();
     return true;
   }
 
-  void print(const char* text)
+  void print(const char* text) override
   {
     char padded[CHAR_COUNT + 1];
     int i = 0;

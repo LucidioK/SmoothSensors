@@ -95,7 +95,7 @@ class VoiceCommandsTests(unittest.TestCase):
     def setUp(self):
         self.instance = VoiceCommandsClass()
 
-    def test_commands_mapping_is_exactly_the_five_move_commands(self):
+    def test_commands_mapping_is_exactly_the_expected_voice_commands(self):
         self.assertEqual(
             voice_commands_module.COMMANDS,
             {
@@ -104,6 +104,23 @@ class VoiceCommandsTests(unittest.TestCase):
                 "turn right": "turn_right",
                 "turn left": "turn_left",
                 "stop": "stop",
+                "calibrate": "calibrate",
+                "point to north": "point_north",
+                "point to northeast": "point_northeast",
+                "point to east": "point_east",
+                "point to southeast": "point_southeast",
+                "point to south": "point_south",
+                "point to southwest": "point_southwest",
+                "point to west": "point_west",
+                "point to northwest": "point_northwest",
+                "point north": "point_north",
+                "point northeast": "point_northeast",
+                "point east": "point_east",
+                "point southeast": "point_southeast",
+                "point south": "point_south",
+                "point southwest": "point_southwest",
+                "point west": "point_west",
+                "point northwest": "point_northwest",
             },
         )
 
@@ -194,9 +211,24 @@ class MainModuleTests(unittest.TestCase):
                 "turn_right": "tr",
                 "turn_left": "tl",
                 "stop": "st",
+                "calibrate": "cb",
+                "point_north": "pN",
+                "point_northeast": "pNE",
+                "point_east": "pE",
+                "point_southeast": "pSE",
+                "point_south": "pS",
+                "point_southwest": "pSW",
+                "point_west": "pW",
+                "point_northwest": "pNW",
             },
         )
         self.assertIsInstance(self.instance._previous, datetime)
+
+    def test_every_voice_command_has_a_led_code(self):
+        self.assertEqual(
+            set(voice_commands_module.COMMANDS.values()),
+            set(self.instance._led_codes),
+        )
 
     def test_loop_does_nothing_when_no_command_is_recognized(self):
         self.instance._voice.poll.return_value = None

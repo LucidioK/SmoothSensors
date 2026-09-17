@@ -7,7 +7,8 @@ This is a simple robot that responds to these voice commands:
 *  Turn right
 *  Turn left
 *  Stop
-  
+*  Calibrate (spins the robot in place to correct compass bias — see [Basic Functionality](#basic-functionality))
+*  Point to <bearing> (North, Northeast, East, Southeast, South, Southwest, West, Northwest — turns the robot in place to face the requested absolute heading, using the calibrated compass — see [Basic Functionality](#basic-functionality))  
 All its code is in this repository, including all files to 3D print its chassis.
 
 [Here is a short video with it in action.](https://www.youtube.com/shorts/WzydsMxYGcc)
@@ -41,14 +42,14 @@ Folder `cad` has the 3D model and the 3D print files for the chassis that accomm
 
 The chassis was optimized to use as little material and to print as fast as possible. As such, it is composed of five parts:
 
-| Part           | Part File | Description  |
-|----------------|-----------|--------------|
-| Top            | RobotChassis03Top.stl           | where the Arduino and the sensors are attached. |
-| Bottom         | RobotChassis03Bottom.stl        | where the battery and the motors are attached. |
-| UsbB           | RobotChassis03UsbB.stl          | The top of the USB hub harness, back part. |
-| UsbF           | RobotChassis03UsbF.stl          | The top of the USB hub harness, front part. |
+| Part           | Part File                       | Description                                                           |
+|----------------|---------------------------------|-----------------------------------------------------------------------|
+| Top            | RobotChassis03Top.stl           | where the Arduino and the sensors are attached.                       |
+| Bottom         | RobotChassis03Bottom.stl        | where the battery and the motors are attached.                        |
+| UsbB           | RobotChassis03UsbB.stl          | The top of the USB hub harness, back part, also where Mic and Camera should be attached. |
+| UsbF           | RobotChassis03UsbF.stl          | The top of the USB hub harness, front part.  |
 | Caster Support | RobotChassis03CasterSupport.stl | to be attached to the Top, then the caster wheel will be attached to. |
-| Bumper         | RobotChassis03Bumper.stl        | (optional) a simple, sturdy bumper in the front, to be attached to the Top and Bottom. |
+
 
 * File [RobotChassis03Split.dwg](cad/RobotChassis03Split.dwg) is the 3D model, it was done in AutoCAD.
 * File [RobotChassis03.3mf](cad/RobotChassis03.3mf) is the Creality print file for all the parts in one print.
@@ -68,9 +69,13 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 
 | File | Description |
 |------|--------------|
-| `sketch.ino` | Main entry point. Wires up the sensors/actuators, exposes `show_text` and `move` to Python over `Bridge`, and drives the main loop (record sensor samples every iteration, print status to the Serial Monitor once a second, auto-stop when an obstacle is closer than 10cm). |
+| `sketch.ino` | Main entry point. Wires up the sensors/actuators, exposes `show_text` and `move` to Python over `Bridge`, and drives the main loop (record sensor samples every iteration, print status to the Serial Monitor once a second, auto-stop when an obstacle is closer than 10cm). Also handles the `calibrate` `move` command: delegates to `CombinedCalibration`, which runs motor calibration then compass calibration in sequence (replacing the former separate `calibrate_motors`/`calibrate_compass` commands). Also handles the 8 `point_*` `move` commands (one per bearing): a turn/settle/re-check loop closes on `SmoothCompass::getDirectionAngle()` until the heading is within ±8° of the target or an 8s timeout elapses, refusing to run (`e06`) unless `CompassCalibration` reports a calibration has already succeeded this boot. |
 | `SmoothDistance.h` | Wraps the `ModulinoDistance` (VL53L4 time-of-flight) sensor in a circular buffer that averages readings after dropping the min/max outlier, exposed via `getDistanceCm()`. |
 | `SmoothMovement.h` | Same outlier-rejecting smoothing technique as `SmoothDistance.h`, applied to the `ModulinoMovement` IMU; exposes smoothed accelerometer and roll/pitch/yaw via `get(...)`. |
+| `SmoothCompass.h` | Same outlier-rejecting smoothing technique, applied to the `Adafruit_LIS3MDL` magnetometer; exposes heading via `getDirectionAngle()`/`getDirectionBearing()`. Raw readings are hard-iron biased (onboard motor/battery/wiring magnetism), so it also tracks raw min/max during a calibration window (`startCalibration()`/`finishCalibration()`) to compute and apply an offset/scale correction. `getDirectionAngle()` now also drives the closed-loop absolute-heading turns behind the `point_*` commands, not just calibration. Includes a `recoverBus()` I2C bus-recovery guard run before any sensor transaction, to fail safely instead of hanging the board on a stuck bus. |
+| `CompassCalibration.h` | Drives the motor-powered, gyro-closed-loop calibration spin, run as the second phase of the `calibrate` command: spins the robot in place via `RobotMotors`, integrating the IMU's `rz` to track rotation until it passes 380° (a 20° overshoot margin) or an 8s timeout elapses, then — if it actually rotated at least 300° — hands the spin off to `SmoothCompass::finishCalibration()` to compute the offset/scale correction. Fully self-contained: owns its own sensor reads and Monitor/LED reporting. |
+| `MotorCalibration.h` | Runs as the first phase of the `calibrate` command: drives a short straight-line run to measure and correct per-wheel power bias, then ramps turn power to find and store a reliable turn speed, plus the turn's steady-state rate and momentum-coast angle (used by `RobotMotors` to compensate point-to-bearing turns for overshoot). Fully self-contained, same shape as `CompassCalibration.h`. |
+| `CombinedCalibration.h` | Sequences `MotorCalibration` then `CompassCalibration` behind the single `calibrate` command (GitHub issue #6) — pure orchestration, no sensor/display access of its own since both sub-features already own their own reporting. |
 | `RobotMotors.h` | Wraps the `ModulinoMotors` dual H-bridge driver; translates command strings (`go_ahead`/`go_back`/`turn_right`/`turn_left`/`stop`) into motor drive calls and reports status via `getStatus()`. |
 | `LedMatrixDisplay.h` | Wraps the Uno Q's built-in 8x13 LED matrix (`ArduinoLEDMatrix`) to print short (3-character) status codes, e.g. `rdy`, `ga`, `st`. |
 | `sketch.yaml` | Pins the `arduino:zephyr` platform and exact versions for every Arduino library the sketch depends on (Modulino, RouterBridge, LSM6DSOX, LIS3MDL magnetometer, etc.), so profile-based builds don't depend on globally installed libraries. |
@@ -81,7 +86,7 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 | File | Description |
 |------|--------------|
 | `main.py` | App entry point. Polls `VoiceCommands` for a recognized command each loop iteration and forwards it to the MCU side via `Bridge.call("show_text", ...)` and `Bridge.call("move", ...)`. |
-| `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands. Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
+| `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands (`go ahead`/`go back`/`turn right`/`turn left`/`stop`/`calibrate`/`point to north`/`point to northeast`/`point to east`/`point to southeast`/`point to south`/`point to southwest`/`point to west`/`point to northwest`). Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
 | `requirements.txt` | Python dependencies for the Linux side (currently just `vosk`, the offline speech recognizer). |
 | `model/` | *(not checked in, gitignored)* The Vosk speech model, tens of MB. Uploaded once by `scripts/deploy.sh` the first time it's missing on the board, then left alone on subsequent deploys. |
 | `tests/test_python_app.py` | Unit tests for `VoiceCommands.py` and `main.py`. Runs off-board by stubbing `vosk`, `arduino.app_utils`, and the `arecord` subprocess. Run with `python -m unittest discover -s python/tests -v`. |
@@ -156,22 +161,37 @@ stateDiagram-v2
     Ready --> GoBack: Voice detected go back
     Ready --> TurnRight: Voice detected turn right
     Ready --> TurnLeft: Voice detected turn left          
+    Ready --> Calibrate: Voice detected calibrate
+    Ready --> Point: Voice detected point to bearing
     GoAhead --> Stop: Voice detected STOP or distance less than 10cm
     GoBack --> Stop: Voice detected STOP or distance less than 10cm
     TurnRight --> Stop: Voice detected STOP or distance less than 10cm
     TurnLeft --> Stop: Voice detected STOP or distance less than 10cm
+    Calibrate --> Ready: Spin reaches 380° or 8s timeout elapses
+    Point --> Ready: Heading reaches target or 8s timeout elapses
     Stop --> Ready
 
 ```
 
+## Error codes
+
+When something goes wrong, the LED matrix shows a short `eN` code instead of the usual `ok`/command-echo status. Meanings:
+
+| Code | Meaning |
+|------|---------|
+| `e1` | The motors failed to initialize at startup, or a voice command arrived before/without them being ready. |
+| `e2` | `robot calibrate` was requested, but the compass, movement sensor, or motors aren't initialized. |
+| `e3` | A calibration spin finished but didn't detect enough rotation (or a wide enough magnetic swing) to compute valid correction values — most likely the robot didn't actually spin (stuck, lifted, or interrupted too early). |
+| `e4` | `robot point to <bearing>` timed out (8 seconds) before the robot's heading reached the target bearing. |
+| `e5` | `robot point to <bearing>` was requested, but the compass, movement sensor, or motors aren't initialized. |
+| `e6` | `robot point to <bearing>` was requested before any compass calibration has succeeded since the robot last booted — run `robot calibrate` first. |
+
+`e01` is reserved in `SPEC.md` for a "find and follow \<object\>" voice command that isn't implemented yet, so it can't appear on the robot today.
 
 ## Known issues
 
 1. (Arduino default behavior) the application must be redeployed every time the board is restarted.
-2. When the robot is moving, due to the noise of the motor, the voice commands are not well understood. You need to talk much louder or close to the mic, depending on the quality of the microphone you are using.
-3. After the robot detects it is in less than 10 centimeters of some obstacle, it does not move. You say `robot go ahead` and it will move for half a second, at the most. In that case, place your hand in front of the distance sensor and move away. 
-4. At this moment, `robot go back` seems to turn the robot.
-5. I am using very low quality motors, so some motors move faster than others despite being fed the same tension and current. I recommend you buy many motors, then test them and get motors with similar RPM when fed 5V.
-
-
+1. When the robot is moving, due to the noise of the motor, the voice commands are not well understood. You need to talk much louder or close to the mic, depending on the quality of the microphone you are using. This has been greatly mitigated with the new USB
+1. After the robot detects it is in less than 10 centimeters of some obstacle, it does not move. You say `robot go ahead` and it will move for half a second, at the most. In that case, place your hand in front of the distance sensor and move away. 
+1. I am using very low quality motors, so some motors move faster than others despite being fed the same tension and current. I recommend you buy many motors, then test them and get motors with similar RPM when fed 5V.
 
