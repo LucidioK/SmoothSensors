@@ -11,7 +11,7 @@ This is a simple robot that responds to these voice commands:
 *  Point to <bearing> (North, Northeast, East, Southeast, South, Southwest, West, Northwest — turns the robot in place to face the requested absolute heading, using the calibrated compass — see [Basic Functionality](#basic-functionality))  
 All its code is in this repository, including all files to 3D print its chassis.
 
-[Here is a short video with it in action.](https://www.youtube.com/shorts/WzydsMxYGcc)
+[Here is a short video with it in action.](https://www.youtube.com/shorts/1sfNaSUcYxk)
 
 ## Bill of materials
 
