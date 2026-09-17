@@ -13,8 +13,6 @@ public:
   virtual bool    move(String command) = 0;
   virtual String  getStatus() = 0;
   virtual uint8_t getDriveSpeed() = 0;
-  virtual int8_t  getStraightBias() = 0;
-  virtual void    setStraightBias(int8_t bias) = 0;
   virtual float   getIdleRz1() = 0;
   virtual void    setIdleRz1(float rz) = 0;
   virtual float   getMinimumRzWhenTurningRight() = 0;
@@ -36,5 +34,7 @@ public:
   virtual bool    isPointing() = 0;
   virtual bool    isPointingAt(const String& command) = 0;
   virtual void    showPointingStatus() = 0;
+  virtual void    updateGoingStraight(int now) = 0;
+  virtual void    showStraightStatus() = 0;
 };
 #endif

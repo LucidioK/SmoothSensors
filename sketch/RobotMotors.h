@@ -13,8 +13,11 @@ class RobotMotors : public IRobotMotors
 {
 private:
   static const uint8_t DRIVE_SPEED = 90;
-  static const uint8_t MAX_SPEED_PERCENT   = 100;                             // ModulinoMotors::setSpeedA/B silently reject >100
-  static const uint8_t MAX_STRAIGHT_BIAS   = MAX_SPEED_PERCENT - DRIVE_SPEED; // headroom above DRIVE_SPEED (==10 today)
+  static const uint8_t MAX_SPEED_PERCENT   = 100;                                  // ModulinoMotors::setSpeedA/B silently reject >100
+  static const uint8_t MAX_STRAIGHT_CORRECTION = MAX_SPEED_PERCENT - DRIVE_SPEED;  // clamp on the live straight-line correction -- headroom above DRIVE_SPEED, ceiling from setSpeedA/B's 100 limit (==10 today)
+  static constexpr int STRAIGHT_CORRECTION_INTERVAL_MS = 200; // ~20 loop iterations at the measured ~8-11ms loop period -- longer than SmoothMovement's 16-sample ring buffer refresh time (~130-175ms), so every correction acts on a buffer that's fully refreshed since the last one. Makes the control gain "per second," not "per loop iteration."
+  static constexpr float STRAIGHT_DEADBAND_DPS = 3.0f; // same value/idiom as MotorCalibration::RZ_DEADBAND_DPS ("rz is effectively at idle")
+  static const int8_t STRAIGHT_CORRECTION_STEP = 1; // one bias unit is ~1.6 dps of yaw authority; deliberately smaller than the deadband so a single step can never carry rz across the deadband and cause chatter/limit-cycling
   static constexpr float TURN_CALIBRATED_MIN_DPS = 10.0f; // "has turn calibration actually run" gate
   static constexpr int MAX_TURN_DURATION_MS = 8000; // sanity ceiling on a single blocking turn pulse -- matches
                                                        // MotorCalibration's own TURN_MAX_DURATION_MS; a computed
@@ -24,7 +27,12 @@ private:
   ModulinoMotors _motors;
   bool _ok = false;
   String _status = "";
-  int8_t  _straightBias = 0;   // >0 => robot veers RIGHT => left(A) gets +bias, right(B) gets -bias
+  bool  _straightActive = false;          // a go_ahead/go_back run is currently under live yaw correction
+  bool  _straightReversed = false;        // true while the active run is go_back
+  float _idleStateRz = 0;                 // issue #10's _idleStateRz -- a DISTINCT member from _idleRz1 (turn calibration, issue #8). Do not merge or reuse either one.
+  bool  _idleStateRzCaptured = false;     // false until the first real capture -- guards against trusting the 0.0f default (real gyro zero-rate bias is rarely exactly 0) if go_ahead/go_back is ever the very first move() this boot
+  int8_t _straightCorrection = 0;         // ephemeral per-run correction; +ve => wheel A (left) faster. Reset to 0 at the start of each straight run, never persisted across runs.
+  int   _straightLastCorrectionAt = 0;
   float _idleRz1 = 0;
   float _minimumRzWhenTurningRight = 0;
   int   _timeInMillisecondsToReachMinimumRzWhenTurningRight = 0;
@@ -103,6 +111,35 @@ private:
     delay(BRAKE_PULSE_MS);
     _lastSpeedA = 0;
     _lastSpeedB = 0;
+  }
+
+  /// @brief Starts (or continues, if the same direction is already running) a live-corrected straight drive.
+  /// Captures _idleStateRz fresh only if the robot was actually stationary just before this call (guarded by
+  /// _lastSpeedA/_lastSpeedB == 0) -- otherwise a mid-turn rz would get latched as "idle" and the controller
+  /// would then fight to maintain that turn. No settle/wait phase: this is an immediate capture, matching the
+  /// issue's "when the go ahead operation starts, save the idle state's rz" -- not a calibration-style
+  /// stabilization wait, which would add an unrequested hesitation before the robot starts moving.
+  void _beginStraightRun(bool reversed) {
+    bool sameRun = _straightActive && _straightReversed == reversed;
+    if (!sameRun) _straightCorrection = 0;
+    if ((_lastSpeedA == 0 && _lastSpeedB == 0) || !_idleStateRzCaptured) {
+      float ax, ay, az, rx, ry, rz;
+      _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
+      _idleStateRz = rz;
+      _idleStateRzCaptured = true;
+    }
+    _straightActive = true;
+    _straightReversed = reversed;
+    _straightLastCorrectionAt = millis();
+  }
+
+  /// @brief Applies the current straight-line correction to the motors. forward = (true,true) invert,
+  /// reverse = (false,false) -- inverted together so the same +correction/-correction pairing (A faster,
+  /// B slower) is reused in both directions; _applyStraightDrive is what actually makes a correction take
+  /// effect, called both when a straight run starts and whenever updateGoingStraight nudges the correction.
+  void _applyStraightDrive() {
+    bool inv = !_straightReversed;
+    _drive(inv, inv, DRIVE_SPEED + _straightCorrection, DRIVE_SPEED - _straightCorrection);
   }
 
   /// @brief Looks up the target heading (degrees) for a "point_*" RPC command string. Returns false if the command isn't a point-to-bearing command.
@@ -235,26 +272,31 @@ public:
     if (command == "go_ahead")
     {
       _status = "GHD";
-      _drive(true, true, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
+      _beginStraightRun(false);
+      _applyStraightDrive();
     }
     else if (command == "go_back")
     {
       _status = "GBK";
-      _drive(false, false, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
+      _beginStraightRun(true);
+      _applyStraightDrive();
     }
     else if (command == "turn_right")
     {
       _status = "TRG";
-      _drive(true, false, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
+      _straightActive = false;
+      _drive(true, false, DRIVE_SPEED, DRIVE_SPEED);
     }
     else if (command == "turn_left")
     {
       _status = "TLF";
-      _drive(false, true, DRIVE_SPEED + _straightBias, DRIVE_SPEED - _straightBias);
+      _straightActive = false;
+      _drive(false, true, DRIVE_SPEED, DRIVE_SPEED);
     }
     else if (command == "stop")
     {
       _status = "STP";
+      _straightActive = false;
       _brake(); // already zeroes _lastSpeedA/B once the pulse is applied (or no-ops if already stopped)
       _motors.stop();
       delay(200);
@@ -274,8 +316,6 @@ public:
 
   uint8_t getDriveSpeed() override { return DRIVE_SPEED; }
 
-  int8_t getStraightBias() override { return _straightBias; }
-  void setStraightBias(int8_t bias) override { _straightBias = (int8_t)constrain((int)bias, -(int)MAX_STRAIGHT_BIAS, (int)MAX_STRAIGHT_BIAS); }
   float getIdleRz1() override { return _idleRz1; }
   void setIdleRz1(float rz) override { _idleRz1 = rz; }
   float getMinimumRzWhenTurningRight() override { return _minimumRzWhenTurningRight; }
@@ -384,6 +424,50 @@ public:
       Monitor.print(" target=");monitorPrintLeftJustified(_pointTargetDegrees, 6);
       Monitor.print(" err=");   monitorPrintLeftJustified(_headingError(_pointTargetDegrees), 6);
     }
+  }
+
+  /// @brief Live per-tick straight-line yaw-hold: every STRAIGHT_CORRECTION_INTERVAL_MS while a go_ahead/
+  /// go_back run is active, nudges the per-wheel correction by one STRAIGHT_CORRECTION_STEP in whichever
+  /// direction opposes the current deviation from _idleStateRz, if that deviation exceeds STRAIGHT_DEADBAND_DPS.
+  /// An incremental (integral-action) nudge rather than a proportional map from rz to correction: the caster
+  /// is a persistent disturbance, and a proportional law would leave a steady-state error (needing a nonzero
+  /// rz to sustain the very correction that cancels it) -- this converges to and HOLDS the exact cancelling
+  /// correction instead.
+  void updateGoingStraight(int now) override {
+    if (!_straightActive || !_ok || !_movement.isOk()) return;
+    if (now - _straightLastCorrectionAt < STRAIGHT_CORRECTION_INTERVAL_MS) return;
+    _straightLastCorrectionAt = now;
+
+    float ax, ay, az, rx, ry, rz;
+    _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
+    float deviation = rz - _idleStateRz;
+    if (fabsf(deviation) < STRAIGHT_DEADBAND_DPS) return;
+
+    // rz > 0 == counter-clockwise == drifting LEFT (turn_left = (false,true) invert = CCW, and
+    // MotorCalibration records that direction as _maximumRzWhenTurningLeft, a positive value -- confirmed
+    // against a real captured turn peaking at +148 dps). Driving forward, a POSITIVE correction speeds up
+    // A (left) and slows B (right), curving the robot RIGHT -- which is what cancels a leftward (positive-rz)
+    // drift. Reverse flips the mapping (both wheels' roles swap), hence `dir`.
+    // IMPORTANT: verify this sign on the first real hardware run -- if the robot curves HARDER instead of
+    // straightening out, flip this single ternary. Do not add a separate configurable sign constant for
+    // this (the old RZ_POSITIVE_IS_RIGHT was exactly that pattern and shipped with the wrong sign).
+    int dir = _straightReversed ? -1 : 1;
+    int8_t next = (int8_t)constrain(
+        (int)_straightCorrection + dir * (deviation > 0 ? STRAIGHT_CORRECTION_STEP : -STRAIGHT_CORRECTION_STEP),
+        -(int)MAX_STRAIGHT_CORRECTION, (int)MAX_STRAIGHT_CORRECTION);
+    if (next == _straightCorrection) return; // saturated -- no redundant I2C writes
+    _straightCorrection = next;
+    _applyStraightDrive();
+  }
+
+  /// @brief Prints the live straight-line correction's current deviation/correction while a go_ahead/go_back
+  /// run is active -- the only way to verify the sign convention and watch convergence on real hardware.
+  void showStraightStatus() override {
+    if (!_straightActive) return;
+    float ax, ay, az, rx, ry, rz;
+    _movement.get(&ax, &ay, &az, &rx, &ry, &rz);
+    Monitor.print(" STR: dev="); monitorPrintLeftJustified(rz - _idleStateRz, 6);
+    Monitor.print(" cor="); Monitor.print(_straightCorrection);
   }
 };
 
