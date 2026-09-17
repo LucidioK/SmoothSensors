@@ -194,6 +194,8 @@ private:
 
       _robotMotors.showPointingStatus();
 
+      _robotMotors.showStraightStatus();
+
       Monitor.println();
       Monitor.flush();
     }
@@ -263,6 +265,7 @@ public:
     if (_robotMotors.updatePointing(now)) {
       _onFeatureStopped();
     }
+    _robotMotors.updateGoingStraight(now);
 
     _monitorDistance(now);
     _showMonitorLine(now);

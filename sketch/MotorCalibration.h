@@ -8,28 +8,26 @@
 #include "ILedMatrixDisplay.h"
 #include "MonitorFormat.h"
 
-/// @brief Drives a motor-powered, gyro-closed-loop motor calibration: first a straight-line run that
-/// integrates the IMU's rz to measure how much the robot veers (correcting it via RobotMotors' per-wheel
-/// straight bias), then a fixed-speed right turn and a fixed-speed left turn, each held for at least
-/// TURN_MIN_DURATION_MS, recording per-direction peak yaw rate, time-to-peak, and time-to-full-stop into
-/// RobotMotors -- consumed there to compute precise open-loop timed turns. Owns its full lifecycle:
-/// start/update/report/cancel, Monitor output, and LED matrix display.
+/// @brief Drives a motor-powered, gyro-closed-loop motor calibration: a fixed-speed right turn and a
+/// fixed-speed left turn, each held for at least TURN_MIN_DURATION_MS, recording per-direction peak yaw
+/// rate, time-to-peak, and time-to-full-stop into RobotMotors -- consumed there to compute precise
+/// open-loop timed turns. Owns its full lifecycle: start/update/report/cancel, Monitor output, and LED
+/// matrix display.
 class MotorCalibration : public IMotorCalibration
 {
 public:
-  enum Phase { IDLE, BASELINE, STRAIGHT, SETTLE,
+  enum Phase { IDLE, BASELINE, SETTLE,
                TURN_RIGHT_MEASURE, STOP_RIGHT_MEASURE,
                TURN_LEFT_MEASURE,  STOP_LEFT_MEASURE };
 
 private:
   static constexpr int BASELINE_MS = 500;
-  static constexpr int STRAIGHT_MS = 5000;
   static constexpr int SETTLE_MS = 800;
-  // BASELINE(500) + STRAIGHT(5000+~320 blocking stop) + SETTLE(~800+) + TURN_RIGHT_MEASURE(up to 8000+~320)
-  // + STOP_RIGHT_MEASURE(up to 6000) + TURN_LEFT_MEASURE(up to 8000+~320) + STOP_LEFT_MEASURE(up to 6000)
-  // ~= 35.5s worst case, plus margin -- SETTLE has no timeout of its own beyond SETTLE_MS, so this leaves
-  // ~15s of slack for it to overrun before the whole run spuriously fails via this global timeout.
-  static constexpr int TIMEOUT_MS = 50000;
+  // BASELINE(500) + SETTLE(800+) + TURN_RIGHT_MEASURE(up to 8000+320) + STOP_RIGHT_MEASURE(up to 6000)
+  // + TURN_LEFT_MEASURE(up to 8000+320) + STOP_LEFT_MEASURE(up to 6000) ~= 29,940ms worst case, plus margin --
+  // SETTLE has no timeout of its own beyond SETTLE_MS, so this leaves ~15s of slack for it to overrun before
+  // the whole run spuriously fails via this global timeout.
+  static constexpr int TIMEOUT_MS = 45000;
   static constexpr int TURN_MIN_DURATION_MS = 4000;    // the issue's "at least 4 seconds"
   static constexpr int TURN_MAX_DURATION_MS = 8000;    // if the plateau hasn't latched by TURN_MIN_DURATION_MS, keep going up to here; still unlatched -> fail
   static constexpr int STOP_MEASURE_TIMEOUT_MS = 6000; // real measured stop/coast time on hardware is ~3s; this gives ~2x margin. Reaching this is a FAILURE (not a silent cap that corrupts the measurement -- this was the root cause of the previous calibration's failure).
@@ -43,9 +41,6 @@ private:
   static constexpr float RZ_SIGNIFICANT_FRACTION = 0.05f;
   static constexpr float RZ_DEADBAND_DPS = 3.0f;      // settle-phase "has stopped rotating" threshold
   static constexpr float TURN_DETECT_DPS = 15.0f;     // "robot is now turning" threshold
-  static constexpr float BIAS_UNITS_PER_DEGREE = 0.2f;
-  static constexpr float MIN_DRIFT_DEGREES = 3.0f;    // below this, treat as already straight
-  static constexpr float RZ_POSITIVE_IS_RIGHT = 1.0f; // sign convention; flip to -1.0f if hardware verification shows it's backwards
 
   IRobotMotors& _motors;
   ISmoothMovement& _movement;
@@ -56,9 +51,7 @@ private:
   bool _lastTimedOut = false;
   int _startedAt = 0;
   int _phaseStartedAt = 0;
-  int _lastTick = 0;
   float _rzBaseline = 0;
-  float _driftDegrees = 0;
   float _idleRzForTurn = 0;
   int   _turnStartedAt = 0;      // fresh millis() taken right after the turn command was issued
   int   _stopStartedAt = 0;      // fresh millis() taken right after the blocking move("stop") returned
@@ -82,7 +75,6 @@ private:
     _motors.move(right ? "turn_right" : "turn_left");
     int afterStart = millis();
     _turnStartedAt = afterStart;
-    _lastTick = afterStart;
     _turnExtremeRz = rz;
     _turnPrevRz = rz;
     _plateauLatched = false;
@@ -114,10 +106,8 @@ private:
 
   /// @brief Enters a stop-measure phase right after a blocking move("stop") call. Must be called with a
   /// FRESHLY-taken millis() value (see comment at the RATE_MEASURE->COAST_MEASURE transition this replaces) --
-  /// never the stale `now` parameter from before the blocking call, or the next update() call's dt would
-  /// misattribute the blocked time.
+  /// never the stale `now` parameter from before the blocking call.
   void _beginStopMeasure(int afterStop) {
-    _lastTick = afterStop;
     _stopStartedAt = afterStop;
     _stopQuietSince = 0;
   }
@@ -132,11 +122,9 @@ private:
   }
 
   // Feeds the current smoothed rz (deg/s) into the state machine. Returns true the iteration the whole
-  // chain (straight-line + turns) finishes, whether successfully or not.
+  // chain (turns) finishes, whether successfully or not.
   bool _step(int now, float rz) {
     if (_phase == IDLE) return false;
-    int dt = now - _lastTick;
-    _lastTick = now;
 
     if (now - _startedAt >= TIMEOUT_MS) {
       _finish(false, true);
@@ -147,24 +135,6 @@ private:
       case BASELINE:
         if (now - _phaseStartedAt >= BASELINE_MS) {
           _rzBaseline = rz;
-          _phase = STRAIGHT;
-          _phaseStartedAt = now;
-          _motors.move("go_ahead");
-        }
-        break;
-
-      case STRAIGHT:
-        _driftDegrees += (rz - _rzBaseline) * dt / 1000.0f;
-        if (now - _phaseStartedAt >= STRAIGHT_MS) {
-          _motors.move("stop");
-          int delta = 0;
-          if (fabsf(_driftDegrees) >= MIN_DRIFT_DEGREES) {
-            // delta is the corrective adjustment, opposite sign from the measured drift
-            delta = -(int)roundf(BIAS_UNITS_PER_DEGREE * _driftDegrees * RZ_POSITIVE_IS_RIGHT);
-          }
-          int newBias = (int)_motors.getStraightBias() + delta;
-          newBias = constrain(newBias, -127, 127);
-          _motors.setStraightBias((int8_t)newBias); // setStraightBias itself clamps to +-MAX_STRAIGHT_BIAS
           _phase = SETTLE;
           _phaseStartedAt = now;
         }
@@ -241,11 +211,9 @@ private:
     bool timedOut = getLastTimedOut();
     Monitor.println();
     Monitor.println("--- FINISH MOTOR CALIBRATION ---");
-    Monitor.print("drift="); Monitor.print(getDriftDegrees(), 2);
-    Monitor.print("deg  timeout="); Monitor.print(timedOut ? "yes" : "no");
+    Monitor.print("timeout="); Monitor.print(timedOut ? "yes" : "no");
     Monitor.print("  ok="); Monitor.println(ok ? "yes" : "no");
-    Monitor.print("straight_bias="); Monitor.print(_motors.getStraightBias());
-    Monitor.print("  idle_rz="); Monitor.println(_motors.getIdleRz1(), 2);
+    Monitor.print("idle_rz="); Monitor.println(_motors.getIdleRz1(), 2);
     Monitor.print("right: min_rz="); Monitor.print(_motors.getMinimumRzWhenTurningRight(), 2);
     Monitor.print("  ramp_ms="); Monitor.print(_motors.getTimeInMillisecondsToReachMinimumRzWhenTurningRight());
     Monitor.print("  stop_ms="); Monitor.println(_motors.getTimeInMillisecondsToStopWhenTurningRight());
@@ -266,8 +234,6 @@ public:
   bool isActive() override { return _phase != IDLE; }
   /// @brief Current phase of an in-progress (or just-finished) calibration run.
   Phase getPhase() { return _phase; }
-  /// @brief Cumulative rz-integrated drift, in degrees, accumulated during the straight-line phase.
-  float getDriftDegrees() { return _driftDegrees; }
   /// @brief Whether the most recently finished run succeeded.
   bool getLastResultOk() { return _lastResultOk; }
   /// @brief Whether the most recently finished run ended via timeout rather than completing normally.
@@ -283,8 +249,7 @@ public:
     Monitor.println("--- STARTING MOTOR CALIBRATION ---");
     Monitor.println();
     _phase = BASELINE;
-    _startedAt = _phaseStartedAt = _lastTick = millis();
-    _driftDegrees = 0;
+    _startedAt = _phaseStartedAt = millis();
     _motors.move("stop");
     return true;
   }
@@ -316,12 +281,10 @@ public:
     return false;
   }
 
-  /// @brief Prints the motor calibration run's drift/live tracked extreme rz while it is in progress.
+  /// @brief Prints the motor calibration run's live tracked extreme rz while it is in progress.
   void showStatus() override {
     if (isActive()) {
-      Monitor.print(" MCL: drift=");
-      monitorPrintLeftJustified(getDriftDegrees(), 6);
-      Monitor.print(" rz="); monitorPrintLeftJustified(_turnExtremeRz, 6);
+      Monitor.print(" MCL: rz="); monitorPrintLeftJustified(_turnExtremeRz, 6);
     }
   }
 };
