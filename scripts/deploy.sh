@@ -35,6 +35,9 @@ else
     | ssh "$BOARD_HOST" "mkdir -p ${REMOTE_DIR}/python && tar xzf - -C ${REMOTE_DIR}/python"
 fi
 
+echo "==> Clearing any corrupted (zero-byte) build cache artifacts"
+ssh "$BOARD_HOST" "find ${REMOTE_DIR}/.cache/sketch -name '*.o' -size 0 -delete" 2>/dev/null || true
+
 echo "==> Restarting the app (compiles + uploads the sketch, restarts the Python app)"
 if ! ssh "$BOARD_HOST" "arduino-app-cli app restart ${REMOTE_DIR}"; then
   echo "==> restart failed (arduino-app-cli sometimes leaves the app stopped instead of restarting it), falling back to stop + start"

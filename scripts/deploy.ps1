@@ -82,6 +82,10 @@ if ($LASTEXITCODE -eq 0) {
     Invoke-Checked -Command $modelCmd -ErrorMessage "model upload failed";
 }
 
+Write-Host "==> Clearing any corrupted (zero-byte) build cache artifacts" -ForegroundColor Green;
+$clearCorruptCmd = "ssh $BoardHost `"find $RemoteDir/.cache/sketch -name '*.o' -size 0 -delete`"";
+cmd /c $clearCorruptCmd 2>$null;
+
 Write-Host "==> Restarting the app (compiles + uploads the sketch, restarts the Python app)" -ForegroundColor Green;
 $restartCmd = "ssh $BoardHost `"arduino-app-cli app restart $RemoteDir`"";
 cmd /c $restartCmd;
