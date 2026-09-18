@@ -69,13 +69,14 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 
 | File | Description |
 |------|--------------|
-| `sketch.ino` | Main entry point. Wires up the sensors/actuators, exposes `show_text` and `move` to Python over `Bridge`, and drives the main loop (record sensor samples every iteration, print status to the Serial Monitor once a second, auto-stop when an obstacle is closer than 10cm). Also handles the `calibrate` `move` command: delegates to `CombinedCalibration`, which runs motor calibration then compass calibration in sequence (replacing the former separate `calibrate_motors`/`calibrate_compass` commands). Also handles the 8 `point_*` `move` commands (one per bearing): a turn/settle/re-check loop closes on `SmoothCompass::getDirectionAngle()` until the heading is within ±8° of the target or an 8s timeout elapses, refusing to run (`e06`) unless `CompassCalibration` reports a calibration has already succeeded this boot. |
+| `sketch.ino` | Main entry point. Wires up the sensors/actuators, exposes `show_text` and `move` to Python over `Bridge`, and drives the main loop (record sensor samples every iteration, print status to the Serial Monitor once a second, auto-stop when an obstacle is closer than 10cm). Also handles the `calibrate` `move` command: delegates to `CombinedCalibration`, which runs motor calibration then compass calibration in sequence (replacing the former separate `calibrate_motors`/`calibrate_compass` commands). Also handles the 8 `point_*` `move` commands (one per bearing): a turn/settle/re-check loop closes on `SmoothCompass::getDirectionAngle()` until the heading is within ±8° of the target or an 8s timeout elapses, refusing to run (`e06`) unless `CompassCalibration` reports a calibration has already succeeded this boot. Also handles the `compass_mode` `move` command, delegating to `CompassMode`. |
 | `SmoothDistance.h` | Wraps the `ModulinoDistance` (VL53L4 time-of-flight) sensor in a circular buffer that averages readings after dropping the min/max outlier, exposed via `getDistanceCm()`. |
 | `SmoothMovement.h` | Same outlier-rejecting smoothing technique as `SmoothDistance.h`, applied to the `ModulinoMovement` IMU; exposes smoothed accelerometer and roll/pitch/yaw via `get(...)`. |
 | `SmoothCompass.h` | Same outlier-rejecting smoothing technique, applied to the `Adafruit_LIS3MDL` magnetometer; exposes heading via `getDirectionAngle()`/`getDirectionBearing()`. Raw readings are hard-iron biased (onboard motor/battery/wiring magnetism), so it also tracks raw min/max during a calibration window (`startCalibration()`/`finishCalibration()`) to compute and apply an offset/scale correction. `getDirectionAngle()` now also drives the closed-loop absolute-heading turns behind the `point_*` commands, not just calibration. Includes a `recoverBus()` I2C bus-recovery guard run before any sensor transaction, to fail safely instead of hanging the board on a stuck bus. |
 | `CompassCalibration.h` | Drives the motor-powered, gyro-closed-loop calibration spin, run as the second phase of the `calibrate` command: spins the robot in place via `RobotMotors`, integrating the IMU's `rz` to track rotation until it passes 380° (a 20° overshoot margin) or an 8s timeout elapses, then — if it actually rotated at least 300° — hands the spin off to `SmoothCompass::finishCalibration()` to compute the offset/scale correction. Fully self-contained: owns its own sensor reads and Monitor/LED reporting. |
 | `MotorCalibration.h` | Runs as the first phase of the `calibrate` command: ramps turn power to find and store a reliable turn speed, plus each direction's steady-state rate and momentum-coast angle (used by `RobotMotors` to compensate point-to-bearing turns for overshoot). Fully self-contained, same shape as `CompassCalibration.h`. |
 | `CombinedCalibration.h` | Sequences `MotorCalibration` then `CompassCalibration` behind the single `calibrate` command (GitHub issue #6) — pure orchestration, no sensor/display access of its own since both sub-features already own their own reporting. |
+| `CompassMode.h` | Continuously displays the compass bearing on the LED matrix while active (GitHub issue #12). Cancelled by `SketchClass` whenever any other text is shown on the LED matrix. |
 | `RobotMotors.h` | Wraps the `ModulinoMotors` dual H-bridge driver; translates command strings (`go_ahead`/`go_back`/`turn_right`/`turn_left`/`stop`) into motor drive calls and reports status via `getStatus()`. While `go_ahead`/`go_back` are driving, continuously reads the gyro's yaw rate and nudges a live per-wheel correction to hold a straight line against the free-swiveling rear caster's drift (GitHub issue #10). |
 | `LedMatrixDisplay.h` | Wraps the Uno Q's built-in 8x13 LED matrix (`ArduinoLEDMatrix`) to print short (3-character) status codes, e.g. `rdy`, `ga`, `st`. |
 | `sketch.yaml` | Pins the `arduino:zephyr` platform and exact versions for every Arduino library the sketch depends on (Modulino, RouterBridge, LSM6DSOX, LIS3MDL magnetometer, etc.), so profile-based builds don't depend on globally installed libraries. |
@@ -86,7 +87,7 @@ This is an [Arduino App Lab](https://docs.arduino.cc/software/app-lab/) project:
 | File | Description |
 |------|--------------|
 | `main.py` | App entry point. Polls `VoiceCommands` for a recognized command each loop iteration and forwards it to the MCU side via `Bridge.call("show_text", ...)` and `Bridge.call("move", ...)`. |
-| `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands (`go ahead`/`go back`/`turn right`/`turn left`/`stop`/`calibrate`/`point to north`/`point to northeast`/`point to east`/`point to southeast`/`point to south`/`point to southwest`/`point to west`/`point to northwest`). Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
+| `VoiceCommands.py` | Offline voice recognition using Vosk, grammar-constrained to the wake word "robot" followed by one of the move commands (`go ahead`/`go back`/`turn right`/`turn left`/`stop`/`calibrate`/`compass mode`/`point to north`/`point to northeast`/`point to east`/`point to southeast`/`point to south`/`point to southwest`/`point to west`/`point to northwest`). Captures audio by spawning `arecord` as a subprocess (not PyAudio, since the board's venv has no C compiler to build native extensions) and feeds the raw PCM to the recognizer. |
 | `requirements.txt` | Python dependencies for the Linux side (currently just `vosk`, the offline speech recognizer). |
 | `model/` | *(not checked in, gitignored)* The Vosk speech model, tens of MB. Uploaded once by `scripts/deploy.sh` the first time it's missing on the board, then left alone on subsequent deploys. |
 | `tests/test_python_app.py` | Unit tests for `VoiceCommands.py` and `main.py`. Runs off-board by stubbing `vosk`, `arduino.app_utils`, and the `arecord` subprocess. Run with `python -m unittest discover -s python/tests -v`. |
@@ -163,12 +164,14 @@ stateDiagram-v2
     Ready --> TurnLeft: Voice detected turn left          
     Ready --> Calibrate: Voice detected calibrate
     Ready --> Point: Voice detected point to bearing
+    Ready --> CompassMode: Voice detected compass mode
     GoAhead --> Stop: Voice detected STOP or distance less than 10cm
     GoBack --> Stop: Voice detected STOP or distance less than 10cm
     TurnRight --> Stop: Voice detected STOP or distance less than 10cm
     TurnLeft --> Stop: Voice detected STOP or distance less than 10cm
     Calibrate --> Ready: Spin reaches 380° or 8s timeout elapses
     Point --> Ready: Heading reaches target or 8s timeout elapses
+    CompassMode --> Ready: Any other text shown on the LED matrix
     Stop --> Ready
 
 ```
@@ -185,6 +188,9 @@ When something goes wrong, the LED matrix shows a short `eN` code instead of the
 | `e4` | `robot point to <bearing>` timed out (8 seconds) before the robot's heading reached the target bearing. |
 | `e5` | `robot point to <bearing>` was requested, but the compass, movement sensor, or motors aren't initialized. |
 | `e6` | `robot point to <bearing>` was requested before any compass calibration has succeeded since the robot last booted — run `robot calibrate` first. |
+| `e7` | `robot calibrate` was requested, but a required sensor/motor isn't initialized (movement sensor or motors). |
+| `e8` | `robot calibrate`'s motor calibration turn-power ramp failed to detect movement. |
+| `e9` | `robot compass mode` was requested, but the compass sensor isn't initialized. |
 
 `e01` is reserved in `SPEC.md` for a "find and follow \<object\>" voice command that isn't implemented yet, so it can't appear on the robot today.
 

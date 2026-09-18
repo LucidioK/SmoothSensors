@@ -10,6 +10,7 @@
 #include "CompassCalibration.h"
 #include "MotorCalibration.h"
 #include "CombinedCalibration.h"
+#include "CompassMode.h"
 #include "MonitorFormat.h"
 
 
@@ -47,6 +48,8 @@ private:
   MotorCalibration _motorCalibration;
   /// @brief Runs the motor calibration followed by the compass calibration as one "calibrate" command.
   CombinedCalibration _combinedCalibration;
+  /// @brief Continuously displays the compass bearing on the LED matrix (issue #12).
+  CompassMode _compassMode;
   /// @brief Time span for status updates, which varies based on whether the robot is moving or not.
   int _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
 
@@ -196,14 +199,19 @@ private:
 
       _robotMotors.showStraightStatus();
 
+      _compassMode.showStatus();
+
       Monitor.println();
       Monitor.flush();
+      // Compass mode's own display refresh. Deliberately bypasses show_text/showTextImplementation -- that path
+      // is the compass-mode cancellation hook, so routing through it would self-cancel every tick.
+      _compassMode.showBearing();
     }
   }
 
 public:
   /// @brief Creates a sketch controller with the stationary status interval.
-  SketchClass() : _robotMotors(_compass, _movement, _ledMatrix), _calibration(_compass, _movement, _robotMotors, _ledMatrix), _motorCalibration(_robotMotors, _movement, _ledMatrix), _combinedCalibration(_motorCalibration, _calibration) {
+  SketchClass() : _robotMotors(_compass, _movement, _ledMatrix), _calibration(_compass, _movement, _robotMotors, _ledMatrix), _motorCalibration(_robotMotors, _movement, _ledMatrix), _combinedCalibration(_motorCalibration, _calibration), _compassMode(_compass, _ledMatrix) {
     _statusTimeSpan = STATUS_TIMESPAN_WHEN_NOT_MOVING_MS;
   }
 
@@ -275,6 +283,16 @@ public:
   /// @brief Writes an RPC text command to the LED matrix.
   bool showTextImplementation(String text)
   {
+    // Issue #12: any text destined for the LED matrix ends compass mode. Cancel BEFORE printing so the
+    // incoming text wins. This is the only hook needed: CompassCalibration/MotorCalibration/RobotMotors write
+    // to _ledMatrix directly (not via show_text) when reporting their own progress/results, but moveImplementation()'s
+    // existing cancel chain (which cancels _combinedCalibration and _robotMotors pointing before dispatching any
+    // other command) guarantees none of those features can be active while compass mode is -- see the compass_mode
+    // dispatch below, placed after that same cancel chain.
+    if (_compassMode.isActive()) {
+      _compassMode.cancel();
+      _onFeatureStopped();
+    }
     _ledMatrix.print(text.c_str());
     return true;
   }
@@ -283,6 +301,14 @@ public:
   bool moveImplementation(String command)
   {
     bool alreadyStopped = false;
+
+    // Cancel compass mode before any OTHER command's own display write happens, so this safety property
+    // doesn't depend on the Python side always sending show_text before move (which showTextImplementation()'s
+    // own hook alone would otherwise rely on) -- self-contained here regardless of caller ordering.
+    if (_compassMode.isActive() && command != "compass_mode") {
+      _compassMode.cancel();
+      _onFeatureStopped();
+    }
 
     if (_combinedCalibration.isActive()) {
       if (command == "calibrate") {
@@ -303,6 +329,17 @@ public:
 
     if (command == "calibrate") {
       bool ok = _combinedCalibration.start();
+      if (ok) _onFeatureStarted();
+      return ok;
+    }
+
+    // Placed after the cancel chain above on purpose: that guarantees no calibration or point-to-bearing
+    // feature is active while compass mode runs. Combined with the explicit _compassMode cancellation at
+    // the top of this method (for any other command) and showTextImplementation()'s hook (for any other
+    // display write, including ones the sketch triggers internally), compass mode's exclusivity doesn't
+    // depend on any particular caller's ordering.
+    if (command == "compass_mode") {
+      bool ok = _compassMode.start();
       if (ok) _onFeatureStarted();
       return ok;
     }
@@ -339,7 +376,9 @@ bool show_text(String text)
 // Forwards the global movement RPC to the sketch controller.
 bool move(String command)
 {
-  if (!sketch.isMotorOk())
+  // compass_mode is display-only (never drives motors), so it must not be gated behind motor health --
+  // otherwise a robot whose motors failed to initialize could never enter compass mode at all.
+  if (!sketch.isMotorOk() && command != "compass_mode")
   {
     show_text("e1");
     return false;
